@@ -1,0 +1,79 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: owui-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DATABASE_USER:-postgres}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+      POSTGRES_DB: ${DATABASE_NAME:-openwebui}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-postgres} -d ${DATABASE_NAME:-openwebui}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - owui-network
+
+  open-webui:
+    image: ghcr.io/${GITHUB_USERNAME}/open-webui:latest
+    container_name: owui-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - owui-data:/app/backend/data
+    environment:
+      # Database
+      - DATABASE_URL=postgresql://${DATABASE_USER:-postgres}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME:-openwebui}
+      
+      # Security
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - WEBUI_AUTH=true
+      - WEBUI_SESSION_COOKIE_SECURE=true
+      
+      # Ollama (if running locally on host)
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      
+      # OpenAI-compatible APIs (optional)
+      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      
+      # Telemetry off
+      - SCARF_NO_ANALYTICS=true
+      - DO_NOT_TRACK=true
+      - ANONYMIZED_TELEMETRY=false
+      
+      # OAuth/Entra (Phase 2 - uncomment when ready)
+      # - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID}
+      # - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET}
+      # - MICROSOFT_CLIENT_TENANT_ID=${MICROSOFT_CLIENT_TENANT_ID}
+      # - ENABLE_OAUTH_SIGNUP=true
+      # - OAUTH_MERGE_ACCOUNTS_BY_EMAIL=true
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    restart: unless-stopped
+    networks:
+      - owui-network
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: owui-cloudflared
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - open-webui
+    networks:
+      - owui-network
+
+volumes:
+  postgres-data:
+  owui-data:
+
+networks:
+  owui-network:
+    driver: bridge
