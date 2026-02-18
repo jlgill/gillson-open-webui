@@ -99,7 +99,7 @@ git push origin main
 
 ```powershell
 # Windows (PowerShell)
-docker exec -t postgres pg_dump -U postgres openwebui > "openwebui_backup_$(Get-Date -Format 'yyyy-MM-dd').sql"
+docker exec -t owui-postgres pg_dump -U postgres openwebui > "openwebui_backup_$(Get-Date -Format 'yyyy-MM-dd').sql"
 
 # Verify backup was created
 Get-ChildItem openwebui_backup*.sql | Select-Object Name, Length, LastWriteTime
