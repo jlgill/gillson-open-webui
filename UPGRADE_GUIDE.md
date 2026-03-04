@@ -6,9 +6,11 @@ This guide documents how to safely upgrade Open WebUI when running with Docker a
 
 | Service | Image | Purpose |
 |---------|-------|---------|
-| **Open WebUI** | `ghcr.io/open-webui/open-webui:main` | AI chat interface |
+| **Open WebUI** | `ghcr.io/jlgill/gillson-open-webui:latest` | AI chat interface |
 | **PostgreSQL** | `postgres:16` | Database storage |
 | **Ollama** | `ollama/ollama:latest` | Local LLM runtime |
+| **Open Terminal** | `ghcr.io/open-webui/open-terminal:latest` | Web terminal |
+| **Cloudflared** | `cloudflare/cloudflared:latest` | Cloudflare Tunnel |
 
 ## Docker Compose File
 
