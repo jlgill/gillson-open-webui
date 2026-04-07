@@ -310,4 +310,13 @@ dist
 # cypress artifacts
 cypress/videos
 cypress/screenshots
-.vscode/settings.json
+.vscode/
+
+# Local editor/workspace artifacts
+.vs/
+
+# Local Open WebUI backup dumps
+openwebui_backup_*.sql
+
+# Generated local terminal API spec
+terminal_spec.json
