@@ -115,7 +115,34 @@ docker exec -t postgres pg_dump -U postgres openwebui > "openwebui_backup_$(date
 ls -la openwebui_backup*.sql
 ```
 
-### Step 2: Stop All Containers
+### Step 2: Build and Push the Custom Image
+
+**Important**: Open WebUI is running a custom image (`ghcr.io/jlgill/gillson-open-webui:latest`) built from this fork — not the upstream image. The image must be built and pushed to GHCR before a `docker compose pull` will fetch anything new.
+
+The GitHub Actions workflow [`.github/workflows/docker-build.yaml`](.github/workflows/docker-build.yaml) triggers automatically on every push to `main`. Since you pushed in the fork sync step above, the build is likely already in progress.
+
+**Monitor the build:**
+```
+https://github.com/jlgill/gillson-open-webui/actions/workflows/docker-build.yaml
+```
+
+Wait until the workflow shows a green checkmark before proceeding.
+
+**If you need to trigger the build manually** (e.g. no code changes were pushed):
+```bash
+# Via GitHub CLI
+gh workflow run docker-build.yaml --repo jlgill/gillson-open-webui
+
+# Or use the GitHub UI: Actions → "Create and publish Docker images" → Run workflow
+```
+
+Verify the new image digest was pushed:
+```bash
+# Should show a recent "Updated" timestamp
+docker manifest inspect ghcr.io/jlgill/gillson-open-webui:latest
+```
+
+### Step 3: Stop All Containers
 
 ```bash
 docker compose -f docker-compose.prod.yaml down
@@ -126,24 +153,24 @@ Verify all containers are stopped:
 docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
 ```
 
-### Step 3: Pull Latest Images
+### Step 4: Pull Latest Images
 
 ```bash
 docker compose -f docker-compose.prod.yaml pull
 ```
 
 This updates:
-- `ghcr.io/open-webui/open-webui:main`
+- `ghcr.io/jlgill/gillson-open-webui:latest` (custom fork image — built in Step 2)
 - `postgres:16` (minor updates only)
 - `ollama/ollama:latest`
 
-### Step 4: Start Containers
+### Step 5: Start Containers
 
 ```bash
 docker compose -f docker-compose.prod.yaml up -d
 ```
 
-### Step 5: Verify Migrations
+### Step 6: Verify Migrations
 
 Open WebUI automatically runs Alembic migrations on startup. Check the logs:
 
@@ -156,7 +183,7 @@ Look for lines like:
 INFO  [alembic.runtime.migration] Running upgrade xxxx -> yyyy, Migration description
 ```
 
-### Step 6: Verify Health Status
+### Step 7: Verify Health Status
 
 ```bash
 docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
@@ -164,7 +191,7 @@ docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
 
 All containers should show `(healthy)` status.
 
-### Step 7: Test the Application
+### Step 8: Test the Application
 
 1. Access Open WebUI at `http://localhost:3000`
 2. Verify you can log in
