@@ -13,7 +13,7 @@ from open_webui.models.access_grants import AccessGrantModel, AccessGrants
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import BigInteger, Column, Text, JSON
-from sqlalchemy import or_, func, cast
+from sqlalchemy import and_, or_, func, cast
 
 ####################
 # Note DB Schema
@@ -158,18 +158,25 @@ class NoteTable:
             if filter:
                 query_key = filter.get('query')
                 if query_key:
-                    # Normalize search by removing hyphens and spaces (e.g., "todo" matches "to-do" and "to do")
-                    normalized_query = query_key.replace('-', '').replace(' ', '')
-                    query = query.filter(
-                        or_(
-                            func.replace(func.replace(Note.title, '-', ''), ' ', '').ilike(f'%{normalized_query}%'),
-                            func.replace(
-                                func.replace(cast(Note.data['content']['md'], Text), '-', ''),
-                                ' ',
-                                '',
-                            ).ilike(f'%{normalized_query}%'),
-                        )
+                    # Split query into individual terms and normalize each
+                    # (e.g., "PA-450 firewall status" matches notes containing all three terms)
+                    # Hyphen removal preserves "todo" matching "to-do" and "to do"
+                    terms = [t.replace('-', '') for t in query_key.split() if t.strip()]
+                    normalized_title = func.replace(func.replace(Note.title, '-', ''), ' ', '')
+                    normalized_content = func.replace(
+                        func.replace(cast(Note.data['content']['md'], Text), '-', ''),
+                        ' ',
+                        '',
                     )
+                    if terms:
+                        term_conditions = [
+                            or_(
+                                normalized_title.ilike(f'%{term}%'),
+                                normalized_content.ilike(f'%{term}%'),
+                            )
+                            for term in terms
+                        ]
+                        query = query.filter(and_(*term_conditions))
 
                 view_option = filter.get('view_option')
                 if view_option == 'created':
