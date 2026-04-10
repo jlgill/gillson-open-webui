@@ -757,16 +757,23 @@ async def search_notes(
             if end_ts and note.updated_at > end_ts:
                 continue
 
-            # Extract a snippet from the markdown content
+            # Extract a snippet from the markdown content, centered on the first matching term
             content_snippet = ''
             if note.data and note.data.get('content', {}).get('md'):
                 md_content = note.data['content']['md']
                 lower_content = md_content.lower()
-                lower_query = query.lower()
-                idx = lower_content.find(lower_query)
-                if idx != -1:
-                    start = max(0, idx - 50)
-                    end = min(len(md_content), idx + len(query) + 100)
+                terms = [t.lower() for t in query.split() if t.strip()]
+                # Find earliest occurrence of any query term
+                best_idx = -1
+                best_term = query
+                for term in terms:
+                    idx = lower_content.find(term)
+                    if idx != -1 and (best_idx == -1 or idx < best_idx):
+                        best_idx = idx
+                        best_term = term
+                if best_idx != -1:
+                    start = max(0, best_idx - 50)
+                    end = min(len(md_content), best_idx + len(best_term) + 100)
                     content_snippet = (
                         ('...' if start > 0 else '') + md_content[start:end] + ('...' if end < len(md_content) else '')
                     )
