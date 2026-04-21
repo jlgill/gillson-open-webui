@@ -794,38 +794,21 @@ async def search_notes(
             content_snippet = ''
             if note.data and note.data.get('content', {}).get('md'):
                 md_content = note.data['content']['md']
-<<<<<<< HEAD
-                lower_content = md_content.lower()
-                terms = [t.lower() for t in query.split() if t.strip()]
-                # Find earliest occurrence of any query term
-                best_idx = -1
-                best_term = query
-                for term in terms:
-                    idx = lower_content.find(term)
-                    if idx != -1 and (best_idx == -1 or idx < best_idx):
-                        best_idx = idx
-                        best_term = term
-                if best_idx != -1:
-                    start = max(0, best_idx - 50)
-                    end = min(len(md_content), best_idx + len(best_term) + 100)
-=======
                 content_lower = md_content.lower()
+                terms = [t.lower() for t in query.split() if t.strip()]
 
-                # Find the first matching word to center the snippet around.
-                search_words = query.lower().split()
+                # Find the earliest matching term to center the snippet around.
                 match_pos = -1
                 match_len = len(query)
-                for word in search_words:
-                    found_pos = content_lower.find(word)
-                    if found_pos != -1:
+                for term in terms:
+                    found_pos = content_lower.find(term)
+                    if found_pos != -1 and (match_pos == -1 or found_pos < match_pos):
                         match_pos = found_pos
-                        match_len = len(word)
-                        break
+                        match_len = len(term)
 
                 if match_pos != -1:
                     snippet_start = max(0, match_pos - 50)
                     snippet_end = min(len(md_content), match_pos + match_len + 100)
->>>>>>> upstream/main
                     content_snippet = (
                         ('...' if snippet_start > 0 else '')
                         + md_content[snippet_start:snippet_end]
@@ -3281,3 +3264,5 @@ async def delete_calendar_event(
     except Exception as e:
         log.exception(f'delete_calendar_event error: {e}')
         return json.dumps({'error': str(e)})
+
+

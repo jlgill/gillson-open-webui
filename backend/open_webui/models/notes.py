@@ -4,7 +4,7 @@ import uuid
 from typing import Optional
 from functools import lru_cache
 
-from sqlalchemy import Boolean, select, delete, update, or_, func, cast
+from sqlalchemy import Boolean, select, delete, update, and_, or_, func, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 from open_webui.internal.db import Base, get_async_db_context
 from open_webui.models.groups import Groups
@@ -14,10 +14,6 @@ from open_webui.models.access_grants import AccessGrantModel, AccessGrants
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import BigInteger, Column, Text, JSON
-<<<<<<< HEAD
-from sqlalchemy import and_, or_, func, cast
-=======
->>>>>>> upstream/main
 
 ####################
 # Note DB Schema
@@ -168,45 +164,28 @@ class NoteTable:
             if filter:
                 query_key = filter.get('query')
                 if query_key:
-<<<<<<< HEAD
                     # Split query into individual terms and normalize each
-                    # (e.g., "PA-450 firewall status" matches notes containing all three terms)
-                    # Hyphen removal preserves "todo" matching "to-do" and "to do"
+                    # (e.g., ""PA-450 firewall status"" matches notes containing all three terms)
+                    # Hyphen removal preserves ""todo"" matching ""to-do"" and ""to do""
                     terms = [t.replace('-', '') for t in query_key.split() if t.strip()]
-                    normalized_title = func.replace(func.replace(Note.title, '-', ''), ' ', '')
-                    normalized_content = func.replace(
-                        func.replace(cast(Note.data['content']['md'], Text), '-', ''),
-                        ' ',
-                        '',
-                    )
                     if terms:
-                        term_conditions = [
-                            or_(
-                                normalized_title.ilike(f'%{term}%'),
-                                normalized_content.ilike(f'%{term}%'),
-                            )
-                            for term in terms
-                        ]
-                        query = query.filter(and_(*term_conditions))
-=======
-                    # Split query into individual words and normalize each
-                    # (strip hyphens so "todo" matches "to-do").
-                    # All words must match somewhere in title OR content (AND semantics).
-                    search_words = query_key.split()
-                    normalized_words = [w.replace('-', '') for w in search_words if w.replace('-', '')]
-                    for word in normalized_words:
+                        normalized_title = func.replace(func.replace(Note.title, '-', ''), ' ', '')
+                        normalized_content = func.replace(
+                            func.replace(cast(Note.data['content']['md'], Text), '-', ''),
+                            ' ',
+                            '',
+                        )
                         stmt = stmt.filter(
-                            or_(
-                                func.replace(func.replace(Note.title, '-', ''), ' ', '').ilike(f'%{word}%'),
-                                func.replace(
-                                    func.replace(cast(Note.data['content']['md'], Text), '-', ''),
-                                    ' ',
-                                    '',
-                                ).ilike(f'%{word}%'),
+                            and_(
+                                *[
+                                    or_(
+                                        normalized_title.ilike(f'%{term}%'),
+                                        normalized_content.ilike(f'%{term}%'),
+                                    )
+                                    for term in terms
+                                ]
                             )
                         )
->>>>>>> upstream/main
-
                 view_option = filter.get('view_option')
                 if view_option == 'created':
                     stmt = stmt.filter(Note.user_id == user_id)
@@ -385,3 +364,5 @@ class NoteTable:
 
 
 Notes = NoteTable()
+
+
