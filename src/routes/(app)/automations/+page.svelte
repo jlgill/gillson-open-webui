@@ -47,8 +47,8 @@
 
 	let page = 1;
 
-	// Debounce only query changes
-	$: if (query !== undefined) {
+	// Debounce only query changes (gate behind loaded to prevent double-fetch on mount)
+	$: if (loaded && query !== undefined) {
 		loading = true;
 		clearTimeout(searchDebounceTimer);
 		searchDebounceTimer = setTimeout(() => {
@@ -57,8 +57,8 @@
 		}, 300);
 	}
 
-	// Immediate response to page/filter changes
-	$: if (page && statusFilter !== undefined) {
+	// Immediate response to page/filter changes (gate behind loaded)
+	$: if (loaded && page && statusFilter !== undefined) {
 		getAutomationList();
 	}
 
@@ -165,12 +165,17 @@
 	};
 
 	onMount(async () => {
-		if ($user?.role !== 'admin' && !($user?.permissions?.features?.automations ?? false)) {
+		if (
+			!$config?.features?.enable_automations ||
+			($user?.role !== 'admin' && !($user?.permissions?.features?.automations ?? false))
+		) {
 			goto('/');
 			return;
 		}
 
 		loaded = true;
+		// Explicit initial fetch — reactive blocks will handle subsequent changes
+		await getAutomationList();
 
 		return () => {
 			clearTimeout(searchDebounceTimer);

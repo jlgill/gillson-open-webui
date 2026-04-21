@@ -29,6 +29,7 @@ export const MODEL_DOWNLOAD_POOL = writable({});
 export const mobile = writable(false);
 
 export const socket: Writable<null | Socket> = writable(null);
+export const socketConnected: Writable<boolean> = writable(true);
 export const activeUserIds: Writable<null | string[]> = writable(null);
 export const activeChatIds: Writable<Set<string>> = writable(new Set());
 export const USAGE_POOL: Writable<null | string[]> = writable(null);
@@ -59,6 +60,7 @@ export const channelId = writable(null);
 
 export const chats = writable(null);
 export const pinnedChats = writable([]);
+export const pinnedNotes = writable([]);
 export const tags = writable([]);
 export const folders = writable([]);
 
@@ -116,8 +118,8 @@ export const temporaryChatEnabled = writable(false);
 // Set by +layout.svelte, consumed and cleared by Chat.svelte.
 export type DesktopEventFile = { name: string; mimeType: string; dataUrl: string };
 export type DesktopEvent = {
-	query?: string;
-	files?: DesktopEventFile[];
+	type: string;
+	data?: any;
 };
 export const desktopEvent: Writable<DesktopEvent | null> = writable(null);
 export const scrollPaginationEnabled = writable(false);
@@ -229,6 +231,7 @@ type Settings = {
 	ctrlEnterToSend?: boolean;
 	renderMarkdownInPreviews?: boolean;
 	recentEmojis?: string[];
+	pinnedMenuItems?: string[];
 
 	system?: string;
 	seed?: number;
