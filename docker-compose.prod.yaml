@@ -1,6 +1,17 @@
+# ===========================================
+# Image Version Pinning
+# ===========================================
+# When upgrading, update the tags below and test thoroughly.
+# Check for new versions at:
+#   postgres:        https://hub.docker.com/_/postgres/tags
+#   ollama:          https://hub.docker.com/ollama/ollama/tags
+#   open-webui:      https://github.com/jlgill/gillson-open-webui/pkgs/container/gillson-open-webui
+#   open-terminal:   https://github.com/open-webui/open-terminal/pkgs/container/open-terminal
+#   cloudflared:     https://hub.docker.com/r/cloudflare/cloudflared/tags
+# ===========================================
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16.9
     container_name: owui-postgres
     restart: unless-stopped
     environment:
@@ -14,6 +25,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2'
     networks:
       - owui-network
 
@@ -25,30 +41,46 @@ services:
     restart: unless-stopped
     deploy:
       resources:
+        limits:
+          memory: 16G
+          cpus: '4'
         reservations:
           devices:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list > /dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     networks:
       - owui-network
+    ports:
+    - "127.0.0.1:11434:11434" # Expose Ollama API port for VS Code (localhost only)
 
   open-webui:
-    image: ghcr.io/jlgill/gillson-open-webui:latest
+    image: ghcr.io/jlgill/gillson-open-webui:latest # TODO: Pin to specific version tag
     container_name: owui-app
     depends_on:
       postgres:
         condition: service_healthy
       ollama:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - owui-data:/app/backend/data
     environment:
-      # Database
-      - DATABASE_URL=postgresql://${DATABASE_USER:-postgres}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME:-openwebui}
+      # Database — decomposed instead of DATABASE_URL with embedded password
+      - DATABASE_TYPE=postgresql
+      - DATABASE_USER=${DATABASE_USER:-postgres}
+      - DATABASE_PASSWORD=${DATABASE_PASSWORD}
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_NAME=${DATABASE_NAME:-openwebui}
       
-      # Security
-      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      # Security — secret key read from file
+      - WEBUI_SECRET_KEY_FILE=/run/secrets/webui_secret_key
       - WEBUI_AUTH=true
       - WEBUI_SESSION_COOKIE_SECURE=true
       
@@ -67,42 +99,71 @@ services:
     extra_hosts:
       - host.docker.internal:host-gateway
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
+    secrets:
+      - webui_secret_key
     networks:
       - owui-network
 
   open-terminal:
-    image: ghcr.io/open-webui/open-terminal:latest
+    image: ghcr.io/open-webui/open-terminal:latest # TODO: Pin to specific version tag
     container_name: owui-terminal
     restart: unless-stopped
     environment:
-      - OPEN_TERMINAL_API_KEY=${OPEN_TERMINAL_API_KEY}
+      - OPEN_TERMINAL_API_KEY_FILE=/run/secrets/open_terminal_api_key
+      - OPEN_TERMINAL_MULTI_USER=true
     volumes:
       - open-terminal:/data
+      - open-terminal-home:/home
+    secrets:
+      - open_terminal_api_key
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 4G
           cpus: '2'
     networks:
       - owui-network
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    image: cloudflare/cloudflared:latest # TODO: Pin to specific version (2025.4.0 has QUIC/UDP buffer issues)
     container_name: owui-cloudflared
     restart: unless-stopped
-    command: tunnel run
+    command: tunnel --protocol http2 run  # http2 required due to QUIC/UDP buffer issues in Docker
     environment:
       - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
     depends_on:
       - open-webui
     networks:
       - owui-network
+
+secrets:
+  webui_secret_key:
+    file: ./secrets/webui_secret_key.txt
+  open_terminal_api_key:
+    file: ./secrets/open_terminal_api_key.txt
 
 volumes:
   postgres-data:
   ollama:
   owui-data:
   open-terminal:
+  open-terminal-home:
 
 networks:
   owui-network:
