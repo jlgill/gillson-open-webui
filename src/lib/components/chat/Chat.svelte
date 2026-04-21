@@ -46,7 +46,8 @@
 		selectedTerminalId,
 		showFileNavPath,
 		showFileNavDir,
-		chatRequestQueues
+		chatRequestQueues,
+		desktopEvent
 	} from '$lib/stores';
 
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
@@ -159,6 +160,8 @@
 	let chat = null;
 	let tags = [];
 
+	let chatTasks = [];
+
 	let history = {
 		messages: {},
 		currentId: null
@@ -198,6 +201,11 @@
 			window.setTimeout(() => scrollToBottom(), 0);
 
 			await tick();
+
+			// Mark chat read when initially loading it
+			if (chatIdProp && !$temporaryChatEnabled) {
+				updateLastReadAt(chatIdProp);
+			}
 
 			// Process any queued requests if the chat is idle
 			const lastMessage = history.currentId ? history.messages[history.currentId] : null;
@@ -239,7 +247,7 @@
 			messageInput?.setText(data, async () => {
 				if (!($settings?.insertSuggestionPrompt ?? false)) {
 					await tick();
-					submitPrompt(prompt);
+					submitHandler(prompt);
 				}
 			});
 		}
@@ -401,6 +409,13 @@
 		saveChatHandler(_chatId, history);
 	};
 
+	const updateLastReadAt = (id) => {
+		$socket?.emit('events:chat', {
+			chat_id: id,
+			data: { type: 'last_read_at' }
+		});
+	};
+
 	const terminalEventHandler = (type: string, data: any) => {
 		if (type === 'terminal:display_file') {
 			if (!data?.path) return;
@@ -449,6 +464,8 @@
 					message.content = data.content;
 				} else if (type === 'chat:message:files' || type === 'files') {
 					message.files = data.files;
+				} else if (type === 'chat:message:tasks') {
+					chatTasks = data.tasks;
 				} else if (type === 'chat:message:embeds' || type === 'embeds') {
 					message.embeds = data.embeds;
 
@@ -586,7 +603,7 @@
 
 			if (prompt !== '') {
 				await tick();
-				submitPrompt(prompt);
+				submitHandler(prompt);
 			}
 		}
 
@@ -607,7 +624,7 @@
 			if (event.data.text !== '') {
 				if (isSameOrigin) {
 					await tick();
-					submitPrompt(event.data.text);
+					submitHandler(event.data.text);
 				} else {
 					// Cross-origin: ask user to confirm before submitting
 					eventConfirmationInput = false;
@@ -616,7 +633,7 @@
 					eventCallback = async (confirmed: boolean) => {
 						if (confirmed) {
 							await tick();
-							submitPrompt(event.data.text);
+							submitHandler(event.data.text);
 						}
 					};
 					showEventConfirmation = true;
@@ -764,6 +781,9 @@
 
 		return () => {
 			try {
+				if (chatIdProp && !$temporaryChatEnabled) {
+					updateLastReadAt(chatIdProp);
+				}
 				pageSubscribe();
 				showControlsSubscribe();
 				selectedFolderSubscribe();
@@ -1156,6 +1176,7 @@
 		chatFiles = [];
 		params = {};
 		taskIds = null;
+		chatTasks = [];
 
 		if ($page.url.searchParams.get('youtube')) {
 			await uploadWeb(`https://www.youtube.com/watch?v=${$page.url.searchParams.get('youtube')}`);
@@ -1205,14 +1226,38 @@
 			showControls.set(true);
 		}
 
-		if ($page.url.searchParams.get('q')) {
+		// Consume one-shot desktop event (e.g. Spotlight query + attachments)
+		if ($desktopEvent) {
+			const { query, files: eventFiles } = $desktopEvent;
+			desktopEvent.set(null);
+
+			// Attach screenshot images from desktop (e.g. Spotlight region capture)
+			if (eventFiles?.length) {
+				for (const ef of eventFiles) {
+					files = [
+						...files,
+						{
+							type: 'image',
+							url: ef.dataUrl,
+							name: ef.name
+						}
+					];
+				}
+			}
+
+			if (query) {
+				messageInput?.setText(query);
+				await tick();
+				submitHandler(query);
+			}
+		} else if ($page.url.searchParams.get('q')) {
 			const q = $page.url.searchParams.get('q') ?? '';
 			messageInput?.setText(q);
 
 			if (q) {
 				if (($page.url.searchParams.get('submit') ?? 'true') === 'true') {
 					await tick();
-					submitPrompt(q);
+					submitHandler(q);
 				}
 			}
 		}
@@ -1268,12 +1313,20 @@
 				params = chatContent?.params ?? {};
 				chatFiles = chatContent?.files ?? [];
 
+				// Load tasks from chat-level DB field
+				chatTasks = chat?.tasks ?? [];
+
 				autoScroll = true;
 				await tick();
 
 				if (history.currentId) {
 					for (const message of Object.values(history.messages)) {
-						if (message && message.role === 'assistant' && message.done !== false) {
+						if (
+							message &&
+							message.role === 'assistant' &&
+							message.id !== history.currentId &&
+							message.done !== false
+						) {
 							message.done = true;
 						}
 					}
@@ -1329,12 +1382,19 @@
 			return rest;
 		});
 
-		files = combinedFiles;
-		await tick();
-		await submitPrompt(combinedPrompt);
+		await submitPrompt(combinedPrompt, combinedFiles);
 	};
 
 	const chatCompletedHandler = async (_chatId, modelId, responseMessageId, messages) => {
+		if (!responseMessageId) {
+			console.error('chatCompleted: missing message id', {
+				chatId: _chatId,
+				modelId,
+				messageCount: messages?.length ?? 0
+			});
+			return;
+		}
+
 		const res = await chatCompleted(localStorage.token, {
 			model: modelId,
 			messages: messages.map((m) => ({
@@ -1759,8 +1819,56 @@
 	// Chat functions
 	//////////////////////////
 
-	const submitPrompt = async (userPrompt, { _raw = false } = {}) => {
-		console.log('submitPrompt', userPrompt, $chatId);
+	const submitPrompt = async (inputContent, inputFiles) => {
+		const _files = structuredClone(inputFiles);
+
+		chatFiles.push(
+			..._files.filter(
+				(item) =>
+					['doc', 'text', 'note', 'chat', 'folder', 'collection'].includes(item.type) ||
+					(item.type === 'file' && !(item?.content_type ?? '').startsWith('image/'))
+			)
+		);
+		chatFiles = chatFiles.filter(
+			// Remove duplicates
+			(item, index, array) =>
+				array.findIndex((i) => JSON.stringify(i) === JSON.stringify(item)) === index
+		);
+
+		// Create user message
+		let userMessageId = uuidv4();
+		let userMessage = {
+			id: userMessageId,
+			parentId: history.currentId ?? null,
+			childrenIds: [],
+			role: 'user',
+			content: inputContent,
+			files: _files.length > 0 ? _files : undefined,
+			timestamp: Math.floor(Date.now() / 1000), // Unix epoch
+			models: selectedModels
+		};
+
+		// Add message to history and Set currentId to messageId
+		history.messages[userMessageId] = userMessage;
+
+		// Append messageId to childrenIds of parent message
+		if (history.currentId !== null) {
+			history.messages[history.currentId].childrenIds.push(userMessageId);
+		}
+
+		history.currentId = userMessageId;
+
+		// focus on chat input
+		const chatInput = document.getElementById('chat-input');
+		chatInput?.focus();
+
+		saveSessionSelectedModels();
+
+		await sendMessage(history, userMessageId, { newChat: true });
+	};
+
+	const submitHandler = async (userPrompt, { _raw = false } = {}) => {
+		console.log('submitHandler', userPrompt, $chatId);
 
 		const _selectedModels = selectedModels.map((modelId) =>
 			$models.map((m) => m.id).includes(modelId) ? modelId : ''
@@ -1840,57 +1948,14 @@
 			}
 		}
 
+		// Clear input and submit
 		messageInput?.setText('');
 		prompt = '';
-
-		const messages = createMessagesList(history, history.currentId);
 		const _files = structuredClone(files);
-
-		chatFiles.push(
-			..._files.filter(
-				(item) =>
-					['doc', 'text', 'note', 'chat', 'folder', 'collection'].includes(item.type) ||
-					(item.type === 'file' && !(item?.content_type ?? '').startsWith('image/'))
-			)
-		);
-		chatFiles = chatFiles.filter(
-			// Remove duplicates
-			(item, index, array) =>
-				array.findIndex((i) => JSON.stringify(i) === JSON.stringify(item)) === index
-		);
-
 		files = [];
 		messageInput?.setText('');
 
-		// Create user message
-		let userMessageId = uuidv4();
-		let userMessage = {
-			id: userMessageId,
-			parentId: messages.length !== 0 ? messages.at(-1).id : null,
-			childrenIds: [],
-			role: 'user',
-			content: userPrompt,
-			files: _files.length > 0 ? _files : undefined,
-			timestamp: Math.floor(Date.now() / 1000), // Unix epoch
-			models: selectedModels
-		};
-
-		// Add message to history and Set currentId to messageId
-		history.messages[userMessageId] = userMessage;
-		history.currentId = userMessageId;
-
-		// Append messageId to childrenIds of parent message
-		if (messages.length !== 0) {
-			history.messages[messages.at(-1).id].childrenIds.push(userMessageId);
-		}
-
-		// focus on chat input
-		const chatInput = document.getElementById('chat-input');
-		chatInput?.focus();
-
-		saveSessionSelectedModels();
-
-		await sendMessage(history, userMessageId, { newChat: true });
+		await submitPrompt(userPrompt, _files);
 	};
 
 	const sendMessage = async (
@@ -2377,7 +2442,7 @@
 		history.messages[responseMessage.id] = responseMessage;
 	};
 
-	const stopResponse = async () => {
+	const stopResponse = async (processQueue = true) => {
 		if (taskIds) {
 			for (const taskId of taskIds) {
 				const res = await stopTask(localStorage.token, taskId).catch((error) => {
@@ -2409,7 +2474,9 @@
 			generationController = null;
 		}
 
-		await processNextInQueue($chatId);
+		if (processQueue) {
+			await processNextInQueue($chatId);
+		}
 	};
 
 	const submitMessage = async (parentId, prompt) => {
@@ -2619,7 +2686,7 @@
 	const MAX_DRAFT_LENGTH = 5000;
 	let saveDraftTimeout: ReturnType<typeof setTimeout> | null = null;
 
-	const saveDraft = async (draft, chatId = null) => {
+	const saveDraft = async (draft: any, chatId: string | null = null) => {
 		if (saveDraftTimeout) {
 			clearTimeout(saveDraftTimeout);
 		}
@@ -2636,7 +2703,7 @@
 		}
 	};
 
-	const clearDraft = async (chatId = null) => {
+	const clearDraft = async (chatId: string | null = null) => {
 		if (saveDraftTimeout) {
 			clearTimeout(saveDraftTimeout);
 		}
@@ -2863,6 +2930,7 @@
 									{createMessagePair}
 									{onUpload}
 									messageQueue={$chatRequestQueues[$chatId] ?? []}
+									{chatTasks}
 									onQueueSendNow={async (id) => {
 										const queue = $chatRequestQueues[$chatId] ?? [];
 										const item = queue.find((m) => m.id === id);
@@ -2872,13 +2940,9 @@
 												...q,
 												[$chatId]: queue.filter((m) => m.id !== id)
 											}));
-											// Stop current generation first
-											await stopResponse();
+											await stopResponse(false);
 											await tick();
-											// Set files and submit
-											files = item.files;
-											await tick();
-											await submitPrompt(item.prompt);
+											await submitPrompt(item.prompt, item.files);
 										}
 									}}
 									onQueueEdit={(id) => {
@@ -2908,11 +2972,11 @@
 										}
 									}}
 									on:submit={async (e) => {
-										clearDraft();
+										clearDraft($chatId);
 										if (e.detail || files.length > 0) {
 											await tick();
 
-											submitPrompt(e.detail.replaceAll('\n\n', '\n'));
+											submitHandler(e.detail.replaceAll('\n\n', '\n'));
 										}
 									}}
 								/>
@@ -2955,7 +3019,7 @@
 										clearDraft();
 										if (e.detail || files.length > 0) {
 											await tick();
-											submitPrompt(e.detail.replaceAll('\n\n', '\n'));
+											submitHandler(e.detail.replaceAll('\n\n', '\n'));
 										}
 									}}
 								/>
@@ -2980,7 +3044,7 @@
 						}
 						return a;
 					}, [])}
-					{submitPrompt}
+					submitPrompt={submitHandler}
 					{stopResponse}
 					{showMessage}
 					{eventTarget}
