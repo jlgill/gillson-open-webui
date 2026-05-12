@@ -1,5 +1,7 @@
 # Open WebUI - AI Coding Agent Instructions
 
+Use this document as a scoped reference, not a checklist. Apply only sections relevant to the current task, and prioritize in this order: Project-Specific Conventions, Critical Integration Points, Common Gotchas, then Architecture/Workflow background.
+
 ## Project Overview
 Open WebUI is an extensible, self-hosted AI platform with a **SvelteKit frontend** and **FastAPI backend**. It provides a web interface for LLMs (Ollama, OpenAI-compatible APIs) with built-in RAG, document processing, and extensibility through Python functions and pipelines.
 
@@ -110,7 +112,7 @@ docker compose up -d
 - **Error Handling**: Use `ERROR_MESSAGES` constants from `open_webui.constants`
 
 ### Frontend Patterns
-- **Svelte 5 Runes**: Use `$state()`, `$derived()`, `$effect()` instead of old `let` reactive declarations
+- **Svelte 5 Runes**: Use `$state()`, `$derived()`, `$effect()` instead of reactive declarations using `let` from pre-Svelte-5 patterns
 - **API Calls**: Always token-authenticated via `src/lib/apis/` functions
 - **Forms**: Pydantic model shapes mirror backend - use TypeScript types from `src/lib/types/`
 - **Routing**: Protected routes in `src/routes/(app)/`, public in `src/routes/auth/`

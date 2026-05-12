@@ -35,7 +35,7 @@ services:
       - owui-network
 
   ollama:
-    image: ollama/ollama:${OLLAMA_DOCKER_TAG:-latest}
+    image: ollama/ollama:${OLLAMA_DOCKER_TAG:-0.23.2}
     container_name: owui-ollama
     volumes:
       - ollama:/root/.ollama
@@ -62,7 +62,7 @@ services:
     - "127.0.0.1:11434:11434" # Expose Ollama API port for VS Code (localhost only)
 
   grafana:
-    image: grafana/otel-lgtm:0.27.0
+    image: grafana/otel-lgtm:0.27.1
     container_name: owui-grafana
     restart: unless-stopped
     environment:
@@ -89,7 +89,7 @@ services:
       - owui-network
 
   open-webui:
-    image: ghcr.io/jlgill/gillson-open-webui:v0.9.2
+    image: ghcr.io/jlgill/gillson-open-webui:v0.9.5
     container_name: owui-app
     depends_on:
       postgres:
