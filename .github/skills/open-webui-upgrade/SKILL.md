@@ -1,12 +1,13 @@
 ---
 name: open-webui-upgrade
-description: "Use when: upgrading Open WebUI with Docker and PostgreSQL, syncing fork with upstream, building custom GHCR image, running migrations, validating health, and preparing rollback steps."
+description: "Use when: automatically upgrading Open WebUI with Docker and PostgreSQL, syncing fork with upstream, building/publishing custom GHCR images, running Alembic migrations, validating service health, and executing rollback if checks fail."
+argument-hint: "mode=guided|execute compose=docker-compose.prod.yaml webuiService=open-webui postgresContainer=owui-postgres dbName=openwebui dbUser=postgres imageRef=ghcr.io/jlgill/gillson-open-webui:latest"
 ---
 
 # Open WebUI Upgrade Workflow (Docker + PostgreSQL)
 
 ## Purpose
-Use this skill to execute or guide a safe Open WebUI upgrade for this repository when deployed with Docker Compose and PostgreSQL.
+Use this skill to run a safe, repeatable OWUI upgrade with explicit safety gates, rollback readiness, and post-upgrade verification.
 
 ## Triggers
 Use this workflow when the user asks to:
@@ -16,47 +17,121 @@ Use this workflow when the user asks to:
 - Validate post-upgrade health
 - Prepare or run rollback after upgrade issues
 
-## Inputs To Confirm First
-Before running commands, confirm:
-- Compose file path (default: `docker-compose.prod.yaml`)
-- Open WebUI service name (often `open-webui`)
-- PostgreSQL container name (often `owui-postgres` or `postgres`)
-- Database name/user (defaults: `openwebui` / `postgres`)
-- Whether this run is `guided` (instructions only) or `execute` (run commands)
+## Execution Modes
+- `guided`: Generate and explain exact commands, do not execute.
+- `execute`: Run the full workflow, stop immediately on failed gates.
 
 ## Safety Rules
 - Always create and verify a database backup before stopping services.
 - Never use destructive Docker volume commands unless explicitly requested.
 - If migration or startup checks fail, stop and offer rollback immediately.
 - Do not assume container names; detect or confirm them.
+- Never change compose image pins to a new tag until `docker manifest inspect` succeeds for that exact tag.
+
+## Inputs
+Collect these once at the start and use defaults when omitted:
+- `composeFile`: `docker-compose.prod.yaml`
+- `webuiService`: `open-webui`
+- `postgresContainer`: `owui-postgres` (fallback: `postgres`)
+- `dbName`: `openwebui`
+- `dbUser`: `postgres`
+- `imageRef`: `ghcr.io/jlgill/gillson-open-webui:latest`
+- `branch`: `main`
+- `syncFork`: `true`
+- `checkGhActions`: `true`
+
+## Decision Logic
+1. If working tree is dirty and `syncFork=true`:
+- Stash before merge, then re-apply stash after merge.
+2. If upstream remote is missing:
+- Add `upstream` as `https://github.com/open-webui/open-webui.git`.
+3. If custom image is used and target tag/manifest does not exist:
+- Trigger `.github/workflows/docker-build.yaml` and block runtime upgrade until manifest verification passes.
+4. If backup file is missing or zero-byte:
+- Abort upgrade.
+5. If migrations fail, service unhealthy, or smoke checks fail:
+- Execute rollback flow.
 
 ## Standard Procedure
-1. Pre-check
-- Review change notes and confirm target upgrade scope.
-- Verify local git status and optionally sync fork with upstream.
+1. Preflight
+- Verify Docker and Compose availability.
+- Check compose file exists.
+- Review release notes in `CHANGELOG.md` and migration caveats.
 
-2. Backup
-- Run `pg_dump` from the PostgreSQL container.
-- Verify backup file exists and is non-zero size.
+2. Fork Sync (recommended)
+- `git fetch upstream`
+- `git checkout <branch>`
+- `git merge upstream/<branch>`
+- `git push origin <branch>`
 
-3. Build/Publish custom image
-- Confirm custom image repo/tag (for this repo, often `ghcr.io/jlgill/gillson-open-webui:latest`).
-- Ensure workflow completed successfully before pulling.
+3. Custom Image Publish Gate (required for this repo)
+- Confirm image is `ghcr.io/jlgill/gillson-open-webui:latest`.
+- Confirm `.github/workflows/docker-build.yaml` has completed successfully.
+- Confirm image manifest/digest is fresh.
 
-4. Upgrade
-- Stop services with the selected compose file.
-- Pull latest images.
-- Start services in detached mode.
+	For versioned upgrades (`vX.Y.Z`) on this repository, build/publish first:
+	- `git fetch upstream --tags`
+	- `git fetch origin --tags`
+	- `git tag -l vX.Y.Z` (or `git fetch upstream tag vX.Y.Z` if missing locally)
+	- `git ls-remote --tags origin vX.Y.Z`
+	- If missing in origin, publish tag to trigger workflow: `git push origin refs/tags/vX.Y.Z`
+	- Wait for `.github/workflows/docker-build.yaml` (triggered by `v*`) to complete successfully
+	- Verify image exists before compose pinning: `docker manifest inspect ghcr.io/jlgill/gillson-open-webui:vX.Y.Z`
+	- Only then change compose to the version tag and continue upgrade
 
-5. Validate
-- Inspect Open WebUI logs for Alembic migration completion.
-- Check container health.
-- Run smoke tests: login, existing chats, new chat creation.
+	If manifest inspect fails, do not pin compose to that tag.
 
-6. Rollback (if needed)
-- Stop services.
-- Restore the selected SQL backup.
-- Restart with pinned previous image tag.
+4. Backup Gate (required)
+- Create dated SQL dump with `pg_dump` from PostgreSQL container.
+- Verify backup exists and has non-zero size.
+
+5. Compose Pin Gate
+- Confirm compose image references the exact verified target tag (or `latest` if intentionally using rolling policy).
+
+6. Upgrade Runtime
+- `docker compose -f <composeFile> down`
+- `docker compose -f <composeFile> pull`
+- `docker compose -f <composeFile> up -d`
+
+7. Migration + Health Validation
+- Inspect OWUI logs for Alembic upgrade lines and absence of fatal errors.
+- Ensure all critical containers report healthy/running.
+- Run `pg_isready` against the target database.
+
+8. Functional Smoke Checks
+- Access OWUI URL.
+- Verify login.
+- Open existing chats.
+- Create a new chat.
+
+9. Rollback (on any failed gate)
+- Stop containers.
+- Restore DB backup.
+- Pin compose to the prior known-good image tag and start services.
+- Re-run health checks.
+
+## Completion Criteria
+Upgrade is complete only when all are true:
+- Backup file exists and is non-zero size.
+- Custom image was built/published and pulled successfully.
+- Alembic migrations completed without fatal errors.
+- Container status is healthy/running.
+- User confirms smoke tests passed.
+
+## Scripted Automation
+For `execute` mode on Windows PowerShell, use:
+- [Upgrade automation script](./scripts/upgrade-owui.ps1)
+
+This script runs preflight, optional fork sync, backup, compose upgrade, migration/health checks, and emits a final summary.
+
+## Output Report Format
+Always report:
+- Backup path, timestamp, and byte size
+- Compose file and services upgraded
+- Pulled image references
+- Migration status summary
+- Health check summary
+- Rollback action taken (if any)
 
 ## Command Patterns
 Prefer matching these patterns to the user's OS and environment:

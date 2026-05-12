@@ -8,6 +8,7 @@
 #   open-webui:      https://github.com/jlgill/gillson-open-webui/pkgs/container/gillson-open-webui
 #   open-terminal:   https://github.com/open-webui/open-terminal/pkgs/container/open-terminal
 #   cloudflared:     https://hub.docker.com/r/cloudflare/cloudflared/tags
+#   grafana-lgtm:    https://hub.docker.com/r/grafana/otel-lgtm/tags
 # ===========================================
 services:
   postgres:
@@ -60,13 +61,42 @@ services:
     ports:
     - "127.0.0.1:11434:11434" # Expose Ollama API port for VS Code (localhost only)
 
+  grafana:
+    image: grafana/otel-lgtm:0.27.0
+    container_name: owui-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    ports:
+      - "127.0.0.1:3000:3000"   # Grafana UI (localhost only)
+      # Ports 4317 (OTLP/gRPC) and 4318 (OTLP/HTTP) are internal — no external exposure needed
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2'
+    volumes:
+      - grafana-data:/data
+    networks:
+      - owui-network
+
   open-webui:
-    image: ghcr.io/jlgill/gillson-open-webui:latest # TODO: Pin to specific version tag
+    image: ghcr.io/jlgill/gillson-open-webui:v0.9.2
     container_name: owui-app
     depends_on:
       postgres:
         condition: service_healthy
       ollama:
+        condition: service_healthy
+      grafana:
         condition: service_healthy
     volumes:
       - owui-data:/app/backend/data
@@ -96,6 +126,15 @@ services:
       - DO_NOT_TRACK=true
       - ANONYMIZED_TELEMETRY=false
       
+      # Observability (OpenTelemetry → Grafana LGTM)
+      - ENABLE_OTEL=true
+      - ENABLE_OTEL_TRACES=true
+      - ENABLE_OTEL_METRICS=true
+      - ENABLE_OTEL_LOGS=true
+      - OTEL_EXPORTER_OTLP_INSECURE=true  # Internal Docker network — no TLS needed
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://grafana:4317
+      - OTEL_SERVICE_NAME=open-webui
+      
     extra_hosts:
       - host.docker.internal:host-gateway
     restart: unless-stopped
@@ -109,14 +148,14 @@ services:
       resources:
         limits:
           memory: 4G
-          cpus: '2'
+          cpus: '4'
     secrets:
       - webui_secret_key
     networks:
       - owui-network
 
   open-terminal:
-    image: ghcr.io/open-webui/open-terminal:latest # TODO: Pin to specific version tag
+    image: ghcr.io/open-webui/open-terminal:0.11.34
     container_name: owui-terminal
     restart: unless-stopped
     environment:
@@ -131,12 +170,12 @@ services:
       resources:
         limits:
           memory: 4G
-          cpus: '2'
+          cpus: '4'
     networks:
       - owui-network
 
   cloudflared:
-    image: cloudflare/cloudflared:latest # TODO: Pin to specific version (2025.4.0 has QUIC/UDP buffer issues)
+    image: cloudflare/cloudflared:2026.3.0
     container_name: owui-cloudflared
     restart: unless-stopped
     command: tunnel --protocol http2 run  # http2 required due to QUIC/UDP buffer issues in Docker
@@ -164,7 +203,9 @@ volumes:
   owui-data:
   open-terminal:
   open-terminal-home:
+  grafana-data:
 
 networks:
   owui-network:
     driver: bridge
+
