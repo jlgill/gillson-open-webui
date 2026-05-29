@@ -146,6 +146,47 @@ docker compose up -d
 2. Implement `search_your_provider(api_key, query, **kwargs) -> list[SearchResult]`
 3. Add to search router in `backend/open_webui/routers/retrieval.py`
 
+## Production Stack Topology (`docker-compose.prod.yaml`)
+
+The prod stack chains LLM traffic through a gateway and observability layer:
+
+```
+Open WebUI ──(OpenAI-compatible)──▶ LiteLLM gateway ──▶ {Azure OpenAI, OpenAI, Anthropic, Google, Ollama, llama-swap}
+                                          │
+                                          └──▶ Langfuse (traces) + Grafana LGTM (OTEL)
+```
+
+### LiteLLM Gateway (`owui-litellm`, port 4000)
+- Image: `ghcr.io/berriai/litellm-database:v1.85.1`
+- Config: [config/litellm-config.yaml](../config/litellm-config.yaml) (bind-mounted read-only)
+- Postgres-backed (`litellm` DB on `owui-postgres`) for virtual keys, spend tracking, team budgets
+- Admin UI: `http://localhost:4000/ui` — login user `admin`, password = `LITELLM_MASTER_KEY` from [.env](../.env)
+- **OWUI talks ONLY to LiteLLM** for OpenAI-compatible providers — see `openai.config` in OWUI config table (PersistentConfig). Direct OpenAI/Azure/Anthropic API keys live in [.env](../.env) and are consumed by LiteLLM, not OWUI.
+- Adding a model: edit `config/litellm-config.yaml` `model_list:`, then `docker compose up -d litellm` (re-mounts config).
+
+### Langfuse v3 Observability Stack
+Five services, all bound to `127.0.0.1` (Cloudflare Tunnel exposes selectively):
+| Service | Image | Role |
+|---------|-------|------|
+| `langfuse-web` | `langfuse/langfuse:3` | UI + API (port 3030) |
+| `langfuse-worker` | `langfuse/langfuse-worker:3` | Async ingestion + background migrations |
+| `clickhouse` | `clickhouse/clickhouse-server:24.8` | Traces/observations columnar store |
+| `redis` | `redis:7.4-alpine` | Queue + cache (must be `maxmemory-policy noeviction`) |
+| `minio` | `minio/minio:RELEASE.2025-04-08T15-41-24Z` | S3-compatible blob store (event/media uploads) |
+
+Compose pattern: `langfuse-worker` defines a YAML anchor `&langfuse-env`; `langfuse-web` merges with `<<: *langfuse-env` then overrides `NEXTAUTH_*`. **Do not** duplicate env between the two — edit the anchor.
+
+### MCP Tools via mcpo (`owui-mcpo`, port 8800 host / 8000 container)
+- Image: `ghcr.io/open-webui/mcpo:git-788ff92` (immutable pin for v0.0.20 — mcpo doesn't publish semver tags, only `latest`/`main`/`dev`/`git-<sha>`)
+- Config: [config/mcpo-config.json](../config/mcpo-config.json) (bind-mounted read-only; hot-reload enabled)
+- API key: file-mounted Docker secret at `./secrets/mcpo_api_key.txt`
+- OAuth tokens: persisted in `mcpo-tokens` Docker volume (`/root/.mcpo` in container)
+- Purpose: bridges remote MCP servers (e.g. ClickUp's official `https://mcp.clickup.com/mcp`) into OWUI's OpenAPI **Tool Servers** feature. OWUI does not speak MCP natively.
+- OWUI wiring: Admin -> Settings -> Tools -> **+** -> `http://mcpo:8000/<server-name>` (internal DNS), bearer = contents of `mcpo_api_key.txt`. Writes to OWUI's `config` table under `tool_server.connections` (PersistentConfig — same gotcha as `openai.config`).
+- Adding a new MCP server: edit `config/mcpo-config.json` `mcpServers:` — hot-reload picks it up. For OAuth-protected servers, first run needs port 3035 mapped so the in-container callback can receive the auth code (the mapping is already in compose; safe to leave bound to 127.0.0.1).
+
+Wiring LiteLLM → Langfuse: set `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` in [.env](../.env) (generated in Langfuse UI → Project Settings → API Keys), then `docker compose up -d litellm`. Callback toggles live in `litellm-config.yaml` under `litellm_settings.success_callback`.
+
 ## Common Gotchas
 
 1. **Database Schema Changes**: Always create Alembic migration, don't modify models without migration
@@ -154,6 +195,10 @@ docker compose up -d
 4. **Ollama Connection**: Use `host.docker.internal` in Docker, `localhost` in native setup
 5. **Redis/WebSocket**: Multi-instance deployments REQUIRE Redis (`WEBSOCKET_MANAGER=redis`)
 6. **Python Environment**: Project requires Python 3.11 (`pyproject.toml` specifies dependencies)
+7. **LiteLLM Master Key**: `LITELLM_MASTER_KEY` and `LITELLM_SALT_KEY` MUST stay identical and never rotate — changing salt invalidates all stored virtual keys.
+8. **Redis Eviction Policy**: Langfuse requires `noeviction`; the `allkeys-lru` default will spam errors and lose queued events.
+9. **OWUI Config vs .env**: OWUI's `openai.config` (provider connections) lives in the `config` table as PersistentConfig JSON — env vars `OPENAI_API_BASE_URL` / `OPENAI_API_KEYS` only seed on first boot. To change providers post-install: SQL update on `config.data->'openai'->'config'` or use the OWUI Admin UI.
+10. **Langfuse Postgres DB**: Langfuse uses its own `langfuse` database on `owui-postgres` (separate from `openwebui` and `litellm`). All three coexist on the same Postgres instance.
 
 ## VS Code Extensions & Tools
 

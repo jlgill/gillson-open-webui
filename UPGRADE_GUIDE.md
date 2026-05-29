@@ -7,10 +7,20 @@ This guide documents how to safely upgrade Open WebUI when running with Docker a
 | Service | Image | Purpose |
 |---------|-------|---------|
 | **Open WebUI** | `ghcr.io/jlgill/gillson-open-webui:latest` | AI chat interface |
-| **PostgreSQL** | `postgres:16` | Database storage |
+| **PostgreSQL** | `postgres:16` | Database storage (hosts `openwebui`, `litellm`, `langfuse` DBs) |
 | **Ollama** | `ollama/ollama:latest` | Local LLM runtime |
+| **llama-swap** | `ghcr.io/mostlygeek/llama-swap:cuda` | GGUF model multiplexer |
+| **LiteLLM** | `ghcr.io/berriai/litellm-database:v1.85.1` | LLM gateway (OpenAI-compatible facade for all providers) |
+| **Langfuse Web** | `langfuse/langfuse:3` | LLM observability UI/API |
+| **Langfuse Worker** | `langfuse/langfuse-worker:3` | Trace ingestion + background migrations |
+| **ClickHouse** | `clickhouse/clickhouse-server:24.8` | Langfuse trace store |
+| **Redis** | `redis:7.4-alpine` | Langfuse queue (`maxmemory-policy noeviction`) |
+| **MinIO** | `minio/minio:RELEASE.2025-04-08T15-41-24Z` | Langfuse S3-compatible blob store |
+| **Grafana LGTM** | `grafana/otel-lgtm:latest` | OTEL traces/metrics/logs |
 | **Open Terminal** | `ghcr.io/open-webui/open-terminal:latest` | Web terminal |
 | **Cloudflared** | `cloudflare/cloudflared:latest` | Cloudflare Tunnel |
+
+> **Upgrade order matters**: when bumping multiple services, upgrade in dependency order — Postgres/ClickHouse/Redis/MinIO → LiteLLM/Langfuse → OWUI. Always back up the `openwebui`, `litellm`, **and** `langfuse` databases with `pg_dump` before any coordinated upgrade.
 
 ## Docker Compose File
 
