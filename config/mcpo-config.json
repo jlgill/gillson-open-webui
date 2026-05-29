@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "clickup": {
+      "type": "streamable-http",
+      "url": "https://mcp.clickup.com/mcp",
+      "oauth": {
+        "server_url": "https://mcp.clickup.com",
+        "storage_type": "file",
+        "callback_port": 3035
+      }
+    }
+  }
+}
