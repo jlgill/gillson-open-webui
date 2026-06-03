@@ -29,7 +29,7 @@ def get_custom_headers(custom_headers: dict, user=None, metadata: dict = None) -
         '{{USER_ID}}': (user.id if user else '') or '',
         '{{USER_NAME}}': (user.name if user else '') or '',
         '{{TASK}}': metadata.get('task', '') or '',
-        '{{MODEL_ID}}': metadata.get('model_id', '') or '',
+        '{{MODEL_ID}}': quote(str(metadata.get('model_id', '') or ''), safe='-./'),
     }
 
     parsed_headers = {}
