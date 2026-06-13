@@ -1,0 +1,306 @@
+# =============================================================================
+# LiteLLM Proxy Configuration — Open WebUI Production Gateway
+# =============================================================================
+# Acts as the single OpenAI-compatible endpoint for OWUI, Thoth, and other
+# internal clients. Fronts Azure Foundry, OpenAI, Ollama, and llama-swap.
+#
+# Secrets are resolved via os.environ/* references (values supplied through
+# .env -> docker compose -> container environment).
+#
+# Reference: https://docs.litellm.ai/docs/proxy/configs
+# =============================================================================
+
+model_list:
+    # ---------------------------------------------------------------------------
+  # OpenAI direct (uses OPENAI_API_KEY from .env)
+  # Curated from /v1/models for this key (May 2026). Chat-capable only.
+  # Excludes: embeddings, image, audio/realtime, transcribe/TTS, deep-research,
+  # dated snapshots (-YYYY-MM-DD), search-preview, moderation.
+  # ---------------------------------------------------------------------------
+  # --- GPT-5.5 (current flagship) ---
+  - model_name: openai/gpt-5.5
+    litellm_params:
+      model: openai/gpt-5.5
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-5.5-pro
+    litellm_params:
+      model: openai/gpt-5.5-pro
+      api_key: os.environ/OPENAI_API_KEY
+
+  # --- GPT-5.4 family ---
+  - model_name: openai/gpt-5.4
+    litellm_params:
+      model: openai/gpt-5.4
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-5.4-mini
+    litellm_params:
+      model: openai/gpt-5.4-mini
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-5.4-nano
+    litellm_params:
+      model: openai/gpt-5.4-nano
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-5.4-pro
+    litellm_params:
+      model: openai/gpt-5.4-pro
+      api_key: os.environ/OPENAI_API_KEY
+
+  # --- GPT-5.3 ---
+  - model_name: openai/gpt-5.3-chat-latest
+    litellm_params:
+      model: openai/gpt-5.3-chat-latest
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-5.3-codex
+    litellm_params:
+      model: openai/gpt-5.3-codex
+      api_key: os.environ/OPENAI_API_KEY
+
+  # --- GPT-5.2 ---
+  - model_name: openai/gpt-5.2
+    litellm_params:
+      model: openai/gpt-5.2
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-5.2-pro
+    litellm_params:
+      model: openai/gpt-5.2-pro
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-5.2-codex
+    litellm_params:
+      model: openai/gpt-5.2-codex
+      api_key: os.environ/OPENAI_API_KEY
+
+  # --- GPT-5.1 ---
+  - model_name: openai/gpt-5.1
+    litellm_params:
+      model: openai/gpt-5.1
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-5.1-codex
+    litellm_params:
+      model: openai/gpt-5.1-codex
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-5.1-codex-max
+    litellm_params:
+      model: openai/gpt-5.1-codex-max
+      api_key: os.environ/OPENAI_API_KEY
+
+  # --- GPT-5 (original) ---
+  - model_name: openai/gpt-5
+    litellm_params:
+      model: openai/gpt-5
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-5-mini
+    litellm_params:
+      model: openai/gpt-5-mini
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-5-nano
+    litellm_params:
+      model: openai/gpt-5-nano
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-5-pro
+    litellm_params:
+      model: openai/gpt-5-pro
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-5-codex
+    litellm_params:
+      model: openai/gpt-5-codex
+      api_key: os.environ/OPENAI_API_KEY
+
+  # --- GPT-4.1 family ---
+  - model_name: openai/gpt-4.1
+    litellm_params:
+      model: openai/gpt-4.1
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-4.1-mini
+    litellm_params:
+      model: openai/gpt-4.1-mini
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-4.1-nano
+    litellm_params:
+      model: openai/gpt-4.1-nano
+      api_key: os.environ/OPENAI_API_KEY
+
+  # --- GPT-4o family ---
+  - model_name: openai/gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  # --- Reasoning models (o-series) ---
+  - model_name: openai/o4-mini
+    litellm_params:
+      model: openai/o4-mini
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/o3
+    litellm_params:
+      model: openai/o3
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/o3-mini
+    litellm_params:
+      model: openai/o3-mini
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/o3-pro
+    litellm_params:
+      model: openai/o3-pro
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/o1
+    litellm_params:
+      model: openai/o1
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/o1-pro
+    litellm_params:
+      model: openai/o1-pro
+      api_key: os.environ/OPENAI_API_KEY
+
+  # ---------------------------------------------------------------------------
+  # Anthropic (direct API)
+  # ---------------------------------------------------------------------------
+  - model_name: anthropic/claude-opus-4
+    litellm_params:
+      model: anthropic/claude-opus-4-20250514
+      api_key: os.environ/ANTHROPIC_API_KEY
+  - model_name: anthropic/claude-sonnet-4-5
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5-20250929
+      api_key: os.environ/ANTHROPIC_API_KEY
+  - model_name: anthropic/claude-haiku-4-5
+    litellm_params:
+      model: anthropic/claude-haiku-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # ---------------------------------------------------------------------------
+  # Ollama (host: ollama service in owui-network)
+  # ---------------------------------------------------------------------------
+  - model_name: ollama/llama3.2
+    litellm_params:
+      model: ollama_chat/llama3.2
+      api_base: http://ollama:11434
+  - model_name: ollama/qwen2.5
+    litellm_params:
+      model: ollama_chat/qwen2.5
+      api_base: http://ollama:11434
+
+  # ---------------------------------------------------------------------------
+  # llama-swap (local GGUF models via llama-server, OpenAI-compatible API)
+  # Source of truth: config/llama-swap.yaml — keep these in sync.
+  # Note: the underlying litellm_params.model MUST stay openai/* because
+  # llama-server speaks the OpenAI protocol — that's what determines routing,
+  # not the public-facing prefix. The "openai" logo in the LiteLLM UI is a
+  # cosmetic artifact of that and cannot be changed without a custom provider.
+  # ---------------------------------------------------------------------------
+  # NOTE: llama-server only implements /v1/chat/completions. The flag
+  # `use_chat_completions_api: true` tells LiteLLM to bridge any incoming
+  # /v1/responses request down to /v1/chat/completions for these models, so
+  # OWUI can stay on the Responses endpoint globally. See LiteLLM docs:
+  # "Opt-in bridge for openai/ models with custom api_base".
+  - model_name: llamacpp-swap/gemma4-e4b
+    litellm_params:
+      model: openai/gemma4-e4b
+      api_base: http://llama-swap:8080/v1
+      api_key: "sk-no-key-required"
+      use_chat_completions_api: true
+  - model_name: llamacpp-swap/deepseek-r1-7b
+    litellm_params:
+      model: openai/deepseek-r1-7b
+      api_base: http://llama-swap:8080/v1
+      api_key: "sk-no-key-required"
+      use_chat_completions_api: true
+  - model_name: llamacpp-swap/deepseek-r1-14b
+    litellm_params:
+      model: openai/deepseek-r1-14b
+      api_base: http://llama-swap:8080/v1
+      api_key: "sk-no-key-required"
+      use_chat_completions_api: true
+  - model_name: llamacpp-swap/qwen2.5-coder-14b
+    litellm_params:
+      model: openai/qwen2.5-coder-14b
+      api_base: http://llama-swap:8080/v1
+      api_key: "sk-no-key-required"
+      use_chat_completions_api: true
+  - model_name: llamacpp-swap/qwen3.5-9b
+    litellm_params:
+      model: openai/qwen3.5-9b
+      api_base: http://llama-swap:8080/v1
+      api_key: "sk-no-key-required"
+      use_chat_completions_api: true
+  - model_name: llamacpp-swap/qwen3.5-4b
+    litellm_params:
+      model: openai/qwen3.5-4b
+      api_base: http://llama-swap:8080/v1
+      api_key: "sk-no-key-required"
+      use_chat_completions_api: true
+  - model_name: llamacpp-swap/qwen3.5-2b
+    litellm_params:
+      model: openai/qwen3.5-2b
+      api_base: http://llama-swap:8080/v1
+      api_key: "sk-no-key-required"
+      use_chat_completions_api: true
+  - model_name: llamacpp-swap/qwen3.5-0.8b
+    litellm_params:
+      model: openai/qwen3.5-0.8b
+      api_base: http://llama-swap:8080/v1
+      api_key: "sk-no-key-required"
+      use_chat_completions_api: true
+  - model_name: llamacpp-swap/qwen3.6-27b
+    litellm_params:
+      model: openai/qwen3.6-27b
+      api_base: http://llama-swap:8080/v1
+      api_key: "sk-no-key-required"
+      use_chat_completions_api: true
+
+  # ---------------------------------------------------------------------------
+  # Semantic aliases — friendly names for OWUI's model picker
+  # ---------------------------------------------------------------------------
+  - model_name: brain-fast
+    litellm_params:
+      model: azure/gpt-4o-mini
+      api_base: os.environ/AZURE_API_BASE
+      api_key: os.environ/AZURE_API_KEY
+      api_version: os.environ/AZURE_API_VERSION
+  - model_name: brain-reasoning
+    litellm_params:
+      model: azure/o4-mini
+      api_base: os.environ/AZURE_API_BASE
+      api_key: os.environ/AZURE_API_KEY
+      api_version: os.environ/AZURE_API_VERSION
+  - model_name: vision-main
+    litellm_params:
+      model: azure/gpt-4o
+      api_base: os.environ/AZURE_API_BASE
+      api_key: os.environ/AZURE_API_KEY
+      api_version: os.environ/AZURE_API_VERSION
+
+# =============================================================================
+# General settings — auth, DB persistence, UI
+# =============================================================================
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  store_model_in_db: true
+  # Spend tracking + virtual keys disabled for now; master key only.
+
+# =============================================================================
+# LiteLLM behavior — callbacks, telemetry
+# =============================================================================
+litellm_settings:
+  drop_params: true                # strip unsupported params per-provider instead of failing
+  set_verbose: false
+  telemetry: false                  # disable Berri telemetry
+  request_timeout: 600              # seconds
+  # OTEL traces -> Grafana LGTM stack (insecure gRPC, internal network)
+  # Langfuse tracing for OWUI chats is handled by the Open WebUI Langfuse v4
+  #   FILTER PIPELINE (config/pipelines/langfuse_filter_pipeline_v4.py), NOT here —
+  #   running both would create duplicate traces. LiteLLM keeps exact provider
+  #   cost in its own spend DB/dashboard regardless of callbacks.
+  callbacks: ["otel"]
+  success_callback: ["otel"]
+  failure_callback: ["otel"]
+  service_callback: ["otel"]
+
+# OTEL exporter settings consumed by LiteLLM's otel integration
+# (also wired via OTEL_EXPORTER_OTLP_* env vars in compose)
+environment_variables:
+  OTEL_EXPORTER: "otlp_grpc"

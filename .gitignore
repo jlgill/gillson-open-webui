@@ -318,6 +318,7 @@ cypress/screenshots
 
 # Local Open WebUI backup dumps
 openwebui_backup_*.sql
+database-backups/
 
 # Generated local terminal API spec
 terminal_spec.json
