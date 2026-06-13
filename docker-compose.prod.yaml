@@ -20,7 +20,7 @@
 # ===========================================
 services:
   postgres:
-    image: postgres:16.9
+    image: postgres:16.13
     container_name: owui-postgres
     restart: unless-stopped
     environment:
@@ -43,7 +43,7 @@ services:
       - owui-network
 
   ollama:
-    image: ollama/ollama:${OLLAMA_DOCKER_TAG:-0.23.2}
+    image: ollama/ollama:${OLLAMA_DOCKER_TAG:-0.30.7}
     container_name: owui-ollama
     volumes:
       - ollama:/root/.ollama
@@ -70,7 +70,7 @@ services:
     - "127.0.0.1:11434:11434" # Expose Ollama API port for VS Code (localhost only)
 
   llama-swap:
-    image: ghcr.io/mostlygeek/llama-swap:${LLAMA_SWAP_DOCKER_TAG:-unified-cuda-2026-05-19}
+    image: ghcr.io/mostlygeek/llama-swap:${LLAMA_SWAP_DOCKER_TAG:-unified-cuda-2026-06-09}
     container_name: owui-llamacpp
     restart: unless-stopped
     volumes:
@@ -97,7 +97,7 @@ services:
       - owui-network
 
   grafana:
-    image: grafana/otel-lgtm:0.27.1
+    image: grafana/otel-lgtm:0.28.0
     container_name: owui-grafana
     restart: unless-stopped
     environment:
@@ -156,7 +156,7 @@ services:
   litellm:
     # LLM gateway / OpenAI-compatible proxy fronting Azure Foundry, OpenAI,
     # Ollama, and llama-swap. UI + spend logs require the -database variant.
-    image: ghcr.io/berriai/litellm-database:v1.85.1
+    image: ghcr.io/berriai/litellm-database:v1.88.1
     container_name: owui-litellm
     restart: unless-stopped
     depends_on:
@@ -169,9 +169,6 @@ services:
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "2"]
     volumes:
       - ./config/litellm-config.yaml:/app/config.yaml:ro
-      # Custom callback module referenced as `litellm_callbacks.owui_session_logger`
-      # in litellm-config.yaml -> maps OWUI session headers to Langfuse sessions/users
-      - ./config/litellm-callbacks.py:/app/litellm_callbacks.py:ro
     environment:
       # Core
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
@@ -214,13 +211,66 @@ services:
     networks:
       - owui-network
 
+  pipelines:
+    # Open WebUI Pipelines — UI-agnostic OpenAI-API plugin host. Runs the
+    # custom Langfuse v4 filter (config/pipelines/langfuse_filter_pipeline_v4.py)
+    # that OWUI applies as an inlet/outlet filter on every chat request.
+    #
+    # Tracing model (Langfuse-native):
+    #   - The filter owns ONE Langfuse trace per chat (session_id = chat_id) and
+    #     creates a `generation` per turn with token usage. Pinned to the Langfuse
+    #     v3 SDK (requirements: langfuse==3.15.0 in the filter header) — the last
+    #     3.x release and the API the filter targets. NOTE: the pipelines auto-
+    #     installer splits the `requirements:` line on commas, so use a single
+    #     comma-free constraint; an unbounded `>=3.x` pulls the 4.x SDK and breaks
+    #     session/trace grouping (update_trace/start_span removed in 4.x).
+    #   - Exact provider cost stays in LiteLLM's own spend DB/dashboard; Langfuse
+    #     shows token usage + its own cost estimate. LiteLLM's langfuse callback
+    #     is disabled to avoid duplicate traces.
+    #
+    # pipelines publishes only `main`/`latest` (no semver) — pin to a git-<sha>
+    # once a known-good build is identified, mirroring the mcpo convention.
+    image: ghcr.io/open-webui/pipelines:git-039f9c5
+    container_name: owui-pipelines
+    restart: unless-stopped
+    depends_on:
+      - langfuse-web
+    environment:
+      # Shared secret OWUI uses to authenticate to this pipeline host. OWUI
+      # registers it as an OpenAI connection / Pipelines URL with this bearer.
+      - PIPELINES_API_KEY=${PIPELINES_API_KEY:-0p3n-w3bu!}
+      # Langfuse client config consumed by the pipeline valves (env defaults).
+      - LANGFUSE_HOST=http://langfuse-web:3000
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+    volumes:
+      # Named volume persists any pipelines installed via the OWUI UI + pip deps.
+      - pipelines-data:/app/pipelines
+      # Version-controlled filter, mounted on top so it auto-loads on boot.
+      - ./config/pipelines/langfuse_filter_pipeline_v4.py:/app/pipelines/langfuse_filter_pipeline_v4.py:ro
+    ports:
+      - "127.0.0.1:9099:9099"   # localhost only; OWUI reaches it via http://pipelines:9099
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9099/', timeout=5).status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1'
+    networks:
+      - owui-network
+
   # ===========================================================================
   # Langfuse v3 stack — LLM observability / evals (Phase 3)
   # Architecture: web + worker + clickhouse + redis + minio (shared postgres)
   # Docs: https://langfuse.com/self-hosting/docker-compose
   # ===========================================================================
   clickhouse:
-    image: clickhouse/clickhouse-server:24.8
+    image: clickhouse/clickhouse-server:24.8.14.39
     container_name: owui-clickhouse
     restart: unless-stopped
     environment:
@@ -249,7 +299,7 @@ services:
       - owui-network
 
   redis:
-    image: redis:7.4-alpine
+    image: redis:7.4.6-alpine
     container_name: owui-redis
     restart: unless-stopped
     command: ["redis-server", "--requirepass", "${REDIS_AUTH}", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
@@ -267,7 +317,7 @@ services:
       - owui-network
 
   minio:
-    image: minio/minio:RELEASE.2025-04-08T15-41-24Z
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: owui-minio
     restart: unless-stopped
     command: server --address ":9000" --console-address ":9001" /data
@@ -293,7 +343,7 @@ services:
       - owui-network
 
   langfuse-worker:
-    image: langfuse/langfuse-worker:3
+    image: langfuse/langfuse-worker:3.180.0
     container_name: owui-langfuse-worker
     restart: unless-stopped
     depends_on:
@@ -342,7 +392,7 @@ services:
       - owui-network
 
   langfuse-web:
-    image: langfuse/langfuse:3
+    image: langfuse/langfuse:3.180.0
     container_name: owui-langfuse
     restart: unless-stopped
     depends_on:
@@ -372,7 +422,7 @@ services:
       - owui-network
 
   open-webui:
-    image: ghcr.io/jlgill/gillson-open-webui:v0.9.5
+    image: ghcr.io/jlgill/gillson-open-webui:v0.9.6
     container_name: owui-app
     depends_on:
       postgres:
@@ -410,9 +460,9 @@ services:
       - OPENAI_API_BASE_URL=http://litellm:4000/v1
       - OPENAI_API_KEY=${LITELLM_MASTER_KEY}
 
-      # Forward X-OpenWebUI-Chat-Id / -User-Id / -User-Email headers to LiteLLM
-      # so the litellm_callbacks.owui_session_logger callback can populate
-      # Langfuse session_id + trace_user_id (Sessions/Users views in Langfuse UI).
+      # Forward X-OpenWebUI-User-Id / -User-Email headers to downstream services.
+      # (Langfuse session/user attribution now comes from the OWUI request body
+      # metadata via the Langfuse filter pipeline, not these headers.)
       - ENABLE_FORWARD_USER_INFO_HEADERS=true
       
       # Telemetry off
@@ -509,7 +559,7 @@ services:
       - owui-network
 
   cloudflared:
-    image: cloudflare/cloudflared:2026.3.0
+    image: cloudflare/cloudflared:2026.6.0
     container_name: owui-cloudflared
     restart: unless-stopped
     command: tunnel --protocol http2 run  # http2 required due to QUIC/UDP buffer issues in Docker
@@ -545,6 +595,7 @@ volumes:
   clickhouse-logs:
   minio-data:
   mcpo-tokens:
+  pipelines-data:
 
 networks:
   owui-network:
