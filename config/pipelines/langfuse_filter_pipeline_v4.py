@@ -5,7 +5,7 @@ date: 2026-06-04
 version: 0.1.0
 license: MIT
 description: A self-contained Langfuse v4 proposal filter for Open WebUI Pipeline inlet/outlet payloads.
-requirements: langfuse>=3.15.0
+requirements: langfuse==3.15.0
 """
 
 from __future__ import annotations
