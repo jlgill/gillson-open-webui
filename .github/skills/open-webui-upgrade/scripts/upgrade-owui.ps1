@@ -10,7 +10,7 @@ param(
     [string]$Branch = 'main',
     [switch]$SkipForkSync,
     [switch]$SkipGhActionsCheck,
-    [string]$BackupDir = '.'
+    [string]$BackupDir = 'database-backups'
 )
 
 $ErrorActionPreference = 'Stop'

@@ -34,3 +34,89 @@ Open WebUI has a default timeout of 5 minutes for Ollama to finish generating th
    - Confirm that the Ollama Server URL is correctly set to `[OLLAMA URL]` (e.g., `http://localhost:11434`).
 
 By following these enhanced troubleshooting steps, connection issues should be effectively resolved. For further assistance or queries, feel free to reach out to us on our community Discord.
+
+## Production PostgreSQL Observability
+
+The production stack exposes PostgreSQL metrics through `owui-postgres-exporter` on `127.0.0.1:9187` and scrapes them into the bundled Grafana LGTM Prometheus instance. This catches database saturation before Open WebUI or LiteLLM fail with `FATAL: sorry, too many clients already`.
+
+### Quick Checks
+
+```powershell
+docker compose -f docker-compose.prod.yaml ps postgres postgres-exporter grafana
+curl.exe -fsS http://127.0.0.1:9187/metrics | Select-String -Pattern "^(pg_up|pg_stat_activity_count|pg_settings_max_connections|pg_exporter_last_scrape_error)"
+docker exec owui-grafana sh -c "curl -fsS --get 'http://localhost:9090/api/v1/query' --data-urlencode 'query=sum(pg_stat_activity_count) / max(pg_settings_max_connections)'"
+```
+
+The connection usage query returns a ratio. For example, `0.85` means PostgreSQL is using 85% of `max_connections`.
+
+### Grafana Dashboard Panels
+
+Create these panels in Grafana using the Prometheus data source:
+
+```promql
+100 * sum(pg_stat_activity_count) / max(pg_settings_max_connections)
+```
+
+Connection usage percent.
+
+```promql
+sum by (datname, state) (pg_stat_activity_count)
+```
+
+Connections by database and state.
+
+```promql
+pg_settings_max_connections
+```
+
+Configured connection ceiling.
+
+```promql
+pg_exporter_last_scrape_error
+```
+
+Exporter scrape health.
+
+```promql
+increase(pg_stat_database_deadlocks{datname!~"template.*|postgres",datid!="0"}[5m])
+```
+
+Deadlocks in the last five minutes.
+
+### Manual Grafana Alert Rules
+
+Start with UI-managed alert rules and labels such as `service=postgres` and `severity=warning|critical`.
+
+| Alert | Query | Threshold | For |
+| --- | --- | --- | --- |
+| PostgreSQL down | `pg_up == 0` | `is above 0` | `1m` |
+| Connection usage warning | `100 * sum(pg_stat_activity_count) / max(pg_settings_max_connections)` | `> 70` | `10m` |
+| Connection usage critical | `100 * sum(pg_stat_activity_count) / max(pg_settings_max_connections)` | `> 85` | `5m` |
+| Connection usage page | `100 * sum(pg_stat_activity_count) / max(pg_settings_max_connections)` | `> 95` | `2m` |
+| Exporter scrape error | `pg_exporter_last_scrape_error` | `> 0` | `5m` |
+| Deadlocks | `increase(pg_stat_database_deadlocks{datname!~"template.*|postgres",datid!="0"}[5m])` | `> 0` | `1m` |
+
+If Loki log alerts are enabled, add a hard-failure alert for the Postgres log phrase `too many clients already`.
+
+### Triage When Connection Usage Alerts Fire
+
+1. Check connection pressure:
+   ```powershell
+   docker exec owui-grafana sh -c "curl -fsS --get 'http://localhost:9090/api/v1/query' --data-urlencode 'query=sum by (datname, state) (pg_stat_activity_count)'"
+   ```
+2. Inspect the recent database-side errors:
+   ```powershell
+   docker logs owui-postgres --tail 80 --timestamps
+   ```
+3. Check the most likely DB-backed dependents:
+   ```powershell
+   docker logs owui-litellm --tail 80 --timestamps
+   docker logs owui-app --tail 80 --timestamps
+   docker logs owui-langfuse --tail 80 --timestamps
+   docker logs owui-langfuse-worker --tail 80 --timestamps
+   ```
+4. If PostgreSQL is refusing every new connection, restart the noisiest dependent first rather than the database. In this stack, start with LiteLLM if its logs show startup retry churn:
+   ```powershell
+   docker compose -f docker-compose.prod.yaml restart litellm
+   ```
+5. Recheck the connection usage ratio and only increase PostgreSQL `max_connections` after confirming there is no retry loop or connection leak.

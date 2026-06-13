@@ -82,7 +82,7 @@ Collect these once at the start and use defaults when omitted:
 	If manifest inspect fails, do not pin compose to that tag.
 
 4. Backup Gate (required)
-- Create dated SQL dump with `pg_dump` from PostgreSQL container.
+- Create dated SQL dump with `pg_dump` from PostgreSQL container into the untracked `database-backups/` folder (create if missing; it is gitignored).
 - Verify backup exists and has non-zero size.
 
 5. Compose Pin Gate
@@ -135,7 +135,7 @@ Always report:
 
 ## Command Patterns
 Prefer matching these patterns to the user's OS and environment:
-- Backup: `docker exec -t <postgres-container> pg_dump -U <db-user> <db-name> > <backup-file>`
+- Backup: `docker exec -t <postgres-container> pg_dump -U <db-user> <db-name> > database-backups/<backup-file>`
 - Stop: `docker compose -f <compose-file> down`
 - Pull: `docker compose -f <compose-file> pull`
 - Start: `docker compose -f <compose-file> up -d`

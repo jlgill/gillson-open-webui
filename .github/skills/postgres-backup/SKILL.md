@@ -1,7 +1,7 @@
 ---
 name: postgres-backup
 description: "Use when: backing up the production Open WebUI PostgreSQL database in preparation for an upgrade, creating a pre-upgrade SQL dump, verifying the backup is non-zero before proceeding, or producing a restore-ready snapshot. Triggers: 'backup the database', 'pre-upgrade backup', 'pg_dump owui', 'snapshot postgres before upgrade'. DO NOT USE FOR: routine scheduled backups, restoring a backup (see UPGRADE_GUIDE.md rollback section), or backing up non-production stacks."
-argument-hint: "postgresContainer=owui-postgres dbName=openwebui dbUser=postgres outputDir=. tag=preupgrade"
+argument-hint: "postgresContainer=owui-postgres dbName=openwebui dbUser=postgres outputDir=database-backups tag=preupgrade"
 ---
 
 # Pre-Upgrade PostgreSQL Backup (Open WebUI Production)
@@ -20,7 +20,7 @@ Use this skill when the user asks to:
 - `postgresContainer`: `owui-postgres`
 - `dbName`: `openwebui`
 - `dbUser`: `postgres`
-- `outputDir`: repository root (`.`)
+- `outputDir`: `database-backups/` (untracked folder at repository root; create it if missing — it is gitignored)
 - `tag`: optional suffix (e.g. `preupgrade`, `v0.9.2`); appended to filename if provided
 - `composeFile`: `docker-compose.prod.yaml` (only used to confirm the container is the prod one)
 
@@ -45,6 +45,7 @@ Filename pattern: `openwebui_backup_YYYY-MM-DD_HHmmss[_<tag>].sql` (timestamp is
 - If any check fails, stop and report. Do not proceed.
 
 ### 2. Resolve Output Filename
+- Ensure the output folder exists: `New-Item -ItemType Directory -Force -Path "database-backups" | Out-Null`
 - Always include the timestamp: `openwebui_backup_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').sql`
 - If `tag` provided, insert before `.sql`: `openwebui_backup_2026-05-11_204311_preupgrade.sql`
 - If the resolved path already exists (extremely unlikely with second-precision), abort — do **not** overwrite.
