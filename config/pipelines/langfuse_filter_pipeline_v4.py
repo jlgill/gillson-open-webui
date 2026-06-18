@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
 from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Tuple
@@ -179,6 +180,11 @@ class Pipeline:
         self.chat_aliases: Dict[str, str] = {}
         self.model_names: Dict[str, dict] = {}
         self.suppressed_logs = set()
+        # Throttled lazy re-init: if the client is ever None (e.g. disabled valve
+        # toggled, or a hard construction failure), retry at most this often from
+        # inlet/outlet so tracing self-heals without needing a container restart.
+        self._last_init_attempt = 0.0
+        self._init_retry_interval = 30.0
 
     def log(self, message: str, suppress_repeats: bool = False, force: bool = False):
         if suppress_repeats:
@@ -249,11 +255,35 @@ class Pipeline:
                 self.langfuse.auth_check()
                 self.log(f"Langfuse client initialized for host: {self.valves.host}", force=True)
             except Exception as e:
-                self.log(f"Langfuse auth check failed for host {self.valves.host}: {e}", force=True)
-                self.langfuse = None
+                # auth_check is an advisory connectivity probe. A transient failure
+                # (e.g. langfuse-web not ready at boot) must NOT permanently disable
+                # tracing: the SDK buffers events and flushes on a background thread,
+                # so we keep the client and let it recover once the server is
+                # reachable. Previously this set self.langfuse = None, which silently
+                # dropped ALL traces until the container was restarted.
+                self.log(
+                    f"Langfuse auth check failed for host {self.valves.host}: {e} "
+                    "(keeping client; events will flush once reachable)",
+                    force=True,
+                )
         except Exception as e:
             self.log(f"Langfuse initialization failed: {e}", force=True)
             self.langfuse = None
+
+    def _ensure_langfuse(self) -> bool:
+        """Return True if a Langfuse client is available, retrying construction
+        (throttled) when it is None so tracing self-heals after a startup race or
+        a transient failure without requiring a container restart."""
+        if self.langfuse is not None:
+            return True
+        if not self.valves.enabled:
+            return False
+        now = time.monotonic()
+        if now - self._last_init_attempt < self._init_retry_interval:
+            return False
+        self._last_init_attempt = now
+        self.set_langfuse()
+        return self.langfuse is not None
 
     def _mask_keys(self) -> set[str]:
         return {key.strip().lower() for key in self.valves.mask_metadata_keys.split(",") if key.strip()}
@@ -966,7 +996,7 @@ class Pipeline:
 
     async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
         self.log("INLET called")
-        if not self.langfuse:
+        if not self._ensure_langfuse():
             self.log("Langfuse client not initialized; inlet skipped.", suppress_repeats=True)
             return body
 
@@ -1070,7 +1100,7 @@ class Pipeline:
 
     async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
         self.log("OUTLET called")
-        if not self.langfuse:
+        if not self._ensure_langfuse():
             self.log("Langfuse client not initialized; outlet skipped.", suppress_repeats=True)
             return body
 

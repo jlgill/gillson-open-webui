@@ -234,7 +234,12 @@ services:
     container_name: owui-pipelines
     restart: unless-stopped
     depends_on:
-      - langfuse-web
+      # Wait for langfuse-web to be HEALTHY (not just started): the filter runs
+      # its one-shot Langfuse auth_check at startup, and if langfuse-web isn't
+      # ready the probe times out. The filter now keeps its client on a transient
+      # auth failure (self-healing), but gating on health avoids the race entirely.
+      langfuse-web:
+        condition: service_healthy
     environment:
       # Shared secret OWUI uses to authenticate to this pipeline host. OWUI
       # registers it as an OpenAI connection / Pipelines URL with this bearer.
