@@ -156,7 +156,7 @@ services:
   litellm:
     # LLM gateway / OpenAI-compatible proxy fronting Azure Foundry, OpenAI,
     # Ollama, and llama-swap. UI + spend logs require the -database variant.
-    image: ghcr.io/berriai/litellm-database:v1.88.1
+    image: ghcr.io/berriai/litellm-database:v1.89.3
     container_name: owui-litellm
     restart: unless-stopped
     depends_on:
@@ -169,6 +169,7 @@ services:
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "2"]
     volumes:
       - ./config/litellm-config.yaml:/app/config.yaml:ro
+      - ./config/litellm-callbacks.py:/app/litellm_callbacks.py:ro
     environment:
       # Core
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}

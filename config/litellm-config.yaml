@@ -291,12 +291,18 @@ litellm_settings:
   telemetry: false                  # disable Berri telemetry
   request_timeout: 600              # seconds
   # OTEL traces -> Grafana LGTM stack (insecure gRPC, internal network)
-  # Langfuse tracing for OWUI chats is handled by the Open WebUI Langfuse v4
-  #   FILTER PIPELINE (config/pipelines/langfuse_filter_pipeline_v4.py), NOT here —
-  #   running both would create duplicate traces. LiteLLM keeps exact provider
-  #   cost in its own spend DB/dashboard regardless of callbacks.
+  # Langfuse cost correlation — works in tandem with the OWUI in-process
+  #   Langfuse filter FUNCTION (config/functions/langfuse_filter.py).
+  #   The custom callback (config/litellm-callbacks.py, mounted as
+  #   /app/litellm_callbacks.py) reconstructs the same deterministic trace ID
+  #   and appends a cost-tagged "litellm_generation" observation to the trace
+  #   the filter already created.  No duplicate top-level traces.
+  #
+  # Required OWUI connection header (Admin → Connections → LiteLLM → Headers):
+  #   X-OpenWebUI-Message-Id: {{MESSAGE_ID}}
+  #   (X-OpenWebUI-Chat-Id is auto-forwarded by ENABLE_FORWARD_USER_INFO_HEADERS)
   callbacks: ["otel"]
-  success_callback: ["otel"]
+  success_callback: ["litellm_callbacks.owui_trace_correlator"]
   failure_callback: ["otel"]
   service_callback: ["otel"]
 
