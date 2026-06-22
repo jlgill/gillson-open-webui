@@ -11,166 +11,6 @@
 # =============================================================================
 
 model_list:
-    # ---------------------------------------------------------------------------
-  # OpenAI direct (uses OPENAI_API_KEY from .env)
-  # Curated from /v1/models for this key (May 2026). Chat-capable only.
-  # Excludes: embeddings, image, audio/realtime, transcribe/TTS, deep-research,
-  # dated snapshots (-YYYY-MM-DD), search-preview, moderation.
-  # ---------------------------------------------------------------------------
-  # --- GPT-5.5 (current flagship) ---
-  - model_name: openai/gpt-5.5
-    litellm_params:
-      model: openai/gpt-5.5
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-5.5-pro
-    litellm_params:
-      model: openai/gpt-5.5-pro
-      api_key: os.environ/OPENAI_API_KEY
-
-  # --- GPT-5.4 family ---
-  - model_name: openai/gpt-5.4
-    litellm_params:
-      model: openai/gpt-5.4
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-5.4-mini
-    litellm_params:
-      model: openai/gpt-5.4-mini
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-5.4-nano
-    litellm_params:
-      model: openai/gpt-5.4-nano
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-5.4-pro
-    litellm_params:
-      model: openai/gpt-5.4-pro
-      api_key: os.environ/OPENAI_API_KEY
-
-  # --- GPT-5.3 ---
-  - model_name: openai/gpt-5.3-chat-latest
-    litellm_params:
-      model: openai/gpt-5.3-chat-latest
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-5.3-codex
-    litellm_params:
-      model: openai/gpt-5.3-codex
-      api_key: os.environ/OPENAI_API_KEY
-
-  # --- GPT-5.2 ---
-  - model_name: openai/gpt-5.2
-    litellm_params:
-      model: openai/gpt-5.2
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-5.2-pro
-    litellm_params:
-      model: openai/gpt-5.2-pro
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-5.2-codex
-    litellm_params:
-      model: openai/gpt-5.2-codex
-      api_key: os.environ/OPENAI_API_KEY
-
-  # --- GPT-5.1 ---
-  - model_name: openai/gpt-5.1
-    litellm_params:
-      model: openai/gpt-5.1
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-5.1-codex
-    litellm_params:
-      model: openai/gpt-5.1-codex
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-5.1-codex-max
-    litellm_params:
-      model: openai/gpt-5.1-codex-max
-      api_key: os.environ/OPENAI_API_KEY
-
-  # --- GPT-5 (original) ---
-  - model_name: openai/gpt-5
-    litellm_params:
-      model: openai/gpt-5
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-5-mini
-    litellm_params:
-      model: openai/gpt-5-mini
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-5-nano
-    litellm_params:
-      model: openai/gpt-5-nano
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-5-pro
-    litellm_params:
-      model: openai/gpt-5-pro
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-5-codex
-    litellm_params:
-      model: openai/gpt-5-codex
-      api_key: os.environ/OPENAI_API_KEY
-
-  # --- GPT-4.1 family ---
-  - model_name: openai/gpt-4.1
-    litellm_params:
-      model: openai/gpt-4.1
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-4.1-mini
-    litellm_params:
-      model: openai/gpt-4.1-mini
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-4.1-nano
-    litellm_params:
-      model: openai/gpt-4.1-nano
-      api_key: os.environ/OPENAI_API_KEY
-
-  # --- GPT-4o family ---
-  - model_name: openai/gpt-4o
-    litellm_params:
-      model: openai/gpt-4o
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/gpt-4o-mini
-    litellm_params:
-      model: openai/gpt-4o-mini
-      api_key: os.environ/OPENAI_API_KEY
-
-  # --- Reasoning models (o-series) ---
-  - model_name: openai/o4-mini
-    litellm_params:
-      model: openai/o4-mini
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/o3
-    litellm_params:
-      model: openai/o3
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/o3-mini
-    litellm_params:
-      model: openai/o3-mini
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/o3-pro
-    litellm_params:
-      model: openai/o3-pro
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/o1
-    litellm_params:
-      model: openai/o1
-      api_key: os.environ/OPENAI_API_KEY
-  - model_name: openai/o1-pro
-    litellm_params:
-      model: openai/o1-pro
-      api_key: os.environ/OPENAI_API_KEY
-
-  # ---------------------------------------------------------------------------
-  # Anthropic (direct API)
-  # ---------------------------------------------------------------------------
-  - model_name: anthropic/claude-opus-4
-    litellm_params:
-      model: anthropic/claude-opus-4-20250514
-      api_key: os.environ/ANTHROPIC_API_KEY
-  - model_name: anthropic/claude-sonnet-4-5
-    litellm_params:
-      model: anthropic/claude-sonnet-4-5-20250929
-      api_key: os.environ/ANTHROPIC_API_KEY
-  - model_name: anthropic/claude-haiku-4-5
-    litellm_params:
-      model: anthropic/claude-haiku-4-5
-      api_key: os.environ/ANTHROPIC_API_KEY
-
   # ---------------------------------------------------------------------------
   # Ollama (host: ollama service in owui-network)
   # ---------------------------------------------------------------------------
@@ -251,28 +91,6 @@ model_list:
       api_key: "sk-no-key-required"
       use_chat_completions_api: true
 
-  # ---------------------------------------------------------------------------
-  # Semantic aliases — friendly names for OWUI's model picker
-  # ---------------------------------------------------------------------------
-  - model_name: brain-fast
-    litellm_params:
-      model: azure/gpt-4o-mini
-      api_base: os.environ/AZURE_API_BASE
-      api_key: os.environ/AZURE_API_KEY
-      api_version: os.environ/AZURE_API_VERSION
-  - model_name: brain-reasoning
-    litellm_params:
-      model: azure/o4-mini
-      api_base: os.environ/AZURE_API_BASE
-      api_key: os.environ/AZURE_API_KEY
-      api_version: os.environ/AZURE_API_VERSION
-  - model_name: vision-main
-    litellm_params:
-      model: azure/gpt-4o
-      api_base: os.environ/AZURE_API_BASE
-      api_key: os.environ/AZURE_API_KEY
-      api_version: os.environ/AZURE_API_VERSION
-
 # =============================================================================
 # General settings — auth, DB persistence, UI
 # =============================================================================
@@ -302,7 +120,10 @@ litellm_settings:
   #   X-OpenWebUI-Message-Id: {{MESSAGE_ID}}
   #   (X-OpenWebUI-Chat-Id is auto-forwarded by ENABLE_FORWARD_USER_INFO_HEADERS)
   callbacks: ["otel"]
-  success_callback: ["litellm_callbacks.owui_trace_correlator"]
+  # "langfuse" → native callback, reads LANGFUSE_PUBLIC/SECRET_KEY from env.
+  # Points at the LiteLLM proxy Langfuse project (LANGFUSE_LITE_LLM_* keys in .env).
+  # Traces ALL traffic (OWUI + VS Code + any other client) with cost + token data.
+  success_callback: ["langfuse", "litellm_callbacks.owui_trace_correlator"]
   failure_callback: ["otel"]
   service_callback: ["otel"]
 

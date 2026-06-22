@@ -191,11 +191,14 @@ services:
       - OTEL_SERVICE_NAME=litellm
       - OTEL_TRACES_EXPORTER=otlp
 
-      # Langfuse traces (Phase 3) — keys generated in Langfuse UI on first login
-      # at http://localhost:3030 -> Project Settings -> API Keys. Paste into .env.
+      # Langfuse — two projects, two key sets:
+      #   LANGFUSE_PUBLIC/SECRET_KEY  → LiteLLM proxy project (native callback, all traffic)
+      #   OWUI_LANGFUSE_PUBLIC/SECRET_KEY → OWUI chat project (OWUITraceCorrelator, cost enrichment)
       - LANGFUSE_HOST=http://langfuse-web:3000
-      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
-      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_LITE_LLM_PROJECT_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_LITE_LLM_SECRET_KEY:-}
+      - OWUI_LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - OWUI_LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
     ports:
       - "127.0.0.1:4000:4000"   # localhost only; internal services use http://litellm:4000
     healthcheck:

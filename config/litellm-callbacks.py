@@ -90,12 +90,15 @@ class OWUITraceCorrelator(CustomLogger):
         self._init_langfuse()
 
     def _init_langfuse(self) -> None:
+        # Use OWUI-project-specific keys so this correlator always posts cost observations
+        # into the OWUI Langfuse project, even when the native 'langfuse' callback is
+        # configured with different (proxy-project) keys via LANGFUSE_PUBLIC/SECRET_KEY.
         host = os.getenv("LANGFUSE_HOST")
-        pub = os.getenv("LANGFUSE_PUBLIC_KEY")
-        sec = os.getenv("LANGFUSE_SECRET_KEY")
+        pub = os.getenv("OWUI_LANGFUSE_PUBLIC_KEY")
+        sec = os.getenv("OWUI_LANGFUSE_SECRET_KEY")
         if not (host and pub and sec):
             log.warning(
-                "OWUITraceCorrelator: LANGFUSE_HOST/PUBLIC_KEY/SECRET_KEY not set — disabled"
+                "OWUITraceCorrelator: LANGFUSE_HOST/OWUI_LANGFUSE_PUBLIC_KEY/OWUI_LANGFUSE_SECRET_KEY not set — disabled"
             )
             return
         try:
