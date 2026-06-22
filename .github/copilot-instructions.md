@@ -3,7 +3,7 @@
 Use this document as a scoped reference, not a checklist. Apply only sections relevant to the current task, and prioritize in this order: Project-Specific Conventions, Critical Integration Points, Common Gotchas, then Architecture/Workflow background.
 
 ## Project Overview
-Open WebUI is an extensible, self-hosted AI platform with a **SvelteKit frontend** and **FastAPI backend**. It provides a web interface for LLMs (Ollama, OpenAI-compatible APIs) with built-in RAG, document processing, and extensibility through Python functions and pipelines.
+Open WebUI is an extensible, self-hosted AI platform with a **SvelteKit frontend** and **FastAPI backend**. It provides a web interface for LLMs (Ollama, OpenAI-compatible APIs) with built-in RAG, document processing, and extensibility through Python functions.
 
 ## Architecture Overview
 
@@ -33,11 +33,7 @@ The backend acts as a **reverse proxy** between the frontend and Ollama/OpenAI A
 - Prevents CORS issues and adds authentication layer
 - See `TROUBLESHOOTING.md` for connection architecture details
 
-#### 2. Pipelines & Functions (Extensibility Layer)
-- **Pipelines** (`routers/pipelines.py`): External microservices that filter/transform LLM requests
-  - Inlet filters: Transform requests before sending to LLM
-  - Outlet filters: Transform responses after receiving from LLM
-  - Priority-based execution chain (sorted by `pipeline.priority`)
+#### 2. Functions (Extensibility Layer)
 - **Functions** (`routers/functions.py`, `functions.py`): Python code executed server-side
   - Load from GitHub URLs or local files
   - Module caching in `CACHE_DIR`
@@ -230,6 +226,6 @@ Agents running in VS Code have access to the **PostgreSQL extension** with MCP t
 - `backend/open_webui/env.py` - Environment variable loading and global constants
 - `src/routes/(app)/+layout.svelte` - Authenticated app shell with sidebar
 - `src/lib/stores/index.ts` - Global state management
-- `docker-compose.yaml` - Standard deployment with Ollama + Open WebUI + Pipelines
+- `docker-compose.yaml` - Standard deployment with Ollama + Open WebUI
 - `pyproject.toml` - Python dependencies (FastAPI, Langchain, Transformers, etc.)
 - `package.json` - Frontend dependencies (SvelteKit, TailwindCSS, TypeScript)

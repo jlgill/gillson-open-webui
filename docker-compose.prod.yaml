@@ -212,64 +212,6 @@ services:
     networks:
       - owui-network
 
-  pipelines:
-    # Open WebUI Pipelines — UI-agnostic OpenAI-API plugin host. Runs the
-    # custom Langfuse v4 filter (config/pipelines/langfuse_filter_pipeline_v4.py)
-    # that OWUI applies as an inlet/outlet filter on every chat request.
-    #
-    # Tracing model (Langfuse-native):
-    #   - The filter owns ONE Langfuse trace per chat (session_id = chat_id) and
-    #     creates a `generation` per turn with token usage. Pinned to the Langfuse
-    #     v3 SDK (requirements: langfuse==3.15.0 in the filter header) — the last
-    #     3.x release and the API the filter targets. NOTE: the pipelines auto-
-    #     installer splits the `requirements:` line on commas, so use a single
-    #     comma-free constraint; an unbounded `>=3.x` pulls the 4.x SDK and breaks
-    #     session/trace grouping (update_trace/start_span removed in 4.x).
-    #   - Exact provider cost stays in LiteLLM's own spend DB/dashboard; Langfuse
-    #     shows token usage + its own cost estimate. LiteLLM's langfuse callback
-    #     is disabled to avoid duplicate traces.
-    #
-    # pipelines publishes only `main`/`latest` (no semver) — pin to a git-<sha>
-    # once a known-good build is identified, mirroring the mcpo convention.
-    image: ghcr.io/open-webui/pipelines:git-039f9c5
-    container_name: owui-pipelines
-    restart: unless-stopped
-    depends_on:
-      # Wait for langfuse-web to be HEALTHY (not just started): the filter runs
-      # its one-shot Langfuse auth_check at startup, and if langfuse-web isn't
-      # ready the probe times out. The filter now keeps its client on a transient
-      # auth failure (self-healing), but gating on health avoids the race entirely.
-      langfuse-web:
-        condition: service_healthy
-    environment:
-      # Shared secret OWUI uses to authenticate to this pipeline host. OWUI
-      # registers it as an OpenAI connection / Pipelines URL with this bearer.
-      - PIPELINES_API_KEY=${PIPELINES_API_KEY:-0p3n-w3bu!}
-      # Langfuse client config consumed by the pipeline valves (env defaults).
-      - LANGFUSE_HOST=http://langfuse-web:3000
-      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
-      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
-    volumes:
-      # Named volume persists any pipelines installed via the OWUI UI + pip deps.
-      - pipelines-data:/app/pipelines
-      # Version-controlled filter, mounted on top so it auto-loads on boot.
-      - ./config/pipelines/langfuse_filter_pipeline_v4.py:/app/pipelines/langfuse_filter_pipeline_v4.py:ro
-    ports:
-      - "127.0.0.1:9099:9099"   # localhost only; OWUI reaches it via http://pipelines:9099
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9099/', timeout=5).status==200 else 1)\""]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: '1'
-    networks:
-      - owui-network
-
   # ===========================================================================
   # Langfuse v3 stack — LLM observability / evals (Phase 3)
   # Architecture: web + worker + clickhouse + redis + minio (shared postgres)
@@ -601,7 +543,6 @@ volumes:
   clickhouse-logs:
   minio-data:
   mcpo-tokens:
-  pipelines-data:
 
 networks:
   owui-network:
