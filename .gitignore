@@ -322,3 +322,6 @@ database-backups/
 
 # Generated local terminal API spec
 terminal_spec.json
+
+# Codepointer artifacts
+.cptr
