@@ -4,92 +4,14 @@
 # Acts as the single OpenAI-compatible endpoint for OWUI, Thoth, and other
 # internal clients. Fronts Azure Foundry, OpenAI, Ollama, and llama-swap.
 #
+# Models are stored in the database (store_model_in_db: true) and managed
+# via the LiteLLM UI at http://localhost:4000/ui — not in this file.
+#
 # Secrets are resolved via os.environ/* references (values supplied through
 # .env -> docker compose -> container environment).
 #
 # Reference: https://docs.litellm.ai/docs/proxy/configs
 # =============================================================================
-
-model_list:
-  # ---------------------------------------------------------------------------
-  # Ollama (host: ollama service in owui-network)
-  # ---------------------------------------------------------------------------
-  - model_name: ollama/llama3.2
-    litellm_params:
-      model: ollama_chat/llama3.2
-      api_base: http://ollama:11434
-  - model_name: ollama/qwen2.5
-    litellm_params:
-      model: ollama_chat/qwen2.5
-      api_base: http://ollama:11434
-
-  # ---------------------------------------------------------------------------
-  # llama-swap (local GGUF models via llama-server, OpenAI-compatible API)
-  # Source of truth: config/llama-swap.yaml — keep these in sync.
-  # Note: the underlying litellm_params.model MUST stay openai/* because
-  # llama-server speaks the OpenAI protocol — that's what determines routing,
-  # not the public-facing prefix. The "openai" logo in the LiteLLM UI is a
-  # cosmetic artifact of that and cannot be changed without a custom provider.
-  # ---------------------------------------------------------------------------
-  # NOTE: llama-server only implements /v1/chat/completions. The flag
-  # `use_chat_completions_api: true` tells LiteLLM to bridge any incoming
-  # /v1/responses request down to /v1/chat/completions for these models, so
-  # OWUI can stay on the Responses endpoint globally. See LiteLLM docs:
-  # "Opt-in bridge for openai/ models with custom api_base".
-  - model_name: llamacpp-swap/gemma4-e4b
-    litellm_params:
-      model: openai/gemma4-e4b
-      api_base: http://llama-swap:8080/v1
-      api_key: "sk-no-key-required"
-      use_chat_completions_api: true
-  - model_name: llamacpp-swap/deepseek-r1-7b
-    litellm_params:
-      model: openai/deepseek-r1-7b
-      api_base: http://llama-swap:8080/v1
-      api_key: "sk-no-key-required"
-      use_chat_completions_api: true
-  - model_name: llamacpp-swap/deepseek-r1-14b
-    litellm_params:
-      model: openai/deepseek-r1-14b
-      api_base: http://llama-swap:8080/v1
-      api_key: "sk-no-key-required"
-      use_chat_completions_api: true
-  - model_name: llamacpp-swap/qwen2.5-coder-14b
-    litellm_params:
-      model: openai/qwen2.5-coder-14b
-      api_base: http://llama-swap:8080/v1
-      api_key: "sk-no-key-required"
-      use_chat_completions_api: true
-  - model_name: llamacpp-swap/qwen3.5-9b
-    litellm_params:
-      model: openai/qwen3.5-9b
-      api_base: http://llama-swap:8080/v1
-      api_key: "sk-no-key-required"
-      use_chat_completions_api: true
-  - model_name: llamacpp-swap/qwen3.5-4b
-    litellm_params:
-      model: openai/qwen3.5-4b
-      api_base: http://llama-swap:8080/v1
-      api_key: "sk-no-key-required"
-      use_chat_completions_api: true
-  - model_name: llamacpp-swap/qwen3.5-2b
-    litellm_params:
-      model: openai/qwen3.5-2b
-      api_base: http://llama-swap:8080/v1
-      api_key: "sk-no-key-required"
-      use_chat_completions_api: true
-  - model_name: llamacpp-swap/qwen3.5-0.8b
-    litellm_params:
-      model: openai/qwen3.5-0.8b
-      api_base: http://llama-swap:8080/v1
-      api_key: "sk-no-key-required"
-      use_chat_completions_api: true
-  - model_name: llamacpp-swap/qwen3.6-27b
-    litellm_params:
-      model: openai/qwen3.6-27b
-      api_base: http://llama-swap:8080/v1
-      api_key: "sk-no-key-required"
-      use_chat_completions_api: true
 
 # =============================================================================
 # General settings — auth, DB persistence, UI
@@ -105,7 +27,7 @@ general_settings:
 # =============================================================================
 litellm_settings:
   drop_params: true                # strip unsupported params per-provider instead of failing
-  set_verbose: false
+  set_verbose: true                 # TEMP: header discovery for VS Code trace enrichment
   telemetry: false                  # disable Berri telemetry
   request_timeout: 600              # seconds
   # OTEL traces -> Grafana LGTM stack (insecure gRPC, internal network)
@@ -123,7 +45,7 @@ litellm_settings:
   # "langfuse" → native callback, reads LANGFUSE_PUBLIC/SECRET_KEY from env.
   # Points at the LiteLLM proxy Langfuse project (LANGFUSE_LITE_LLM_* keys in .env).
   # Traces ALL traffic (OWUI + VS Code + any other client) with cost + token data.
-  success_callback: ["langfuse", "litellm_callbacks.owui_trace_correlator"]
+  success_callback: ["langfuse", "litellm_callbacks.owui_trace_correlator", "litellm_diagnostic.header_diagnostic_logger"]  # TEMP: +diagnostic
   failure_callback: ["otel"]
   service_callback: ["otel"]
 

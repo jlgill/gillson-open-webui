@@ -17,6 +17,7 @@
 #   minio:           https://hub.docker.com/r/minio/minio/tags
 #   langfuse:        https://github.com/langfuse/langfuse/pkgs/container/langfuse
 #   mcpo:            https://github.com/open-webui/mcpo/pkgs/container/mcpo
+#   playwright-mcp:  https://github.com/microsoft/playwright-mcp/releases (+ https://mcr.microsoft.com/playwright/tags)
 # ===========================================
 services:
   postgres:
@@ -43,7 +44,7 @@ services:
       - owui-network
 
   ollama:
-    image: ollama/ollama:${OLLAMA_DOCKER_TAG:-0.30.7}
+    image: ollama/ollama:${OLLAMA_DOCKER_TAG:-0.30.11}
     container_name: owui-ollama
     volumes:
       - ollama:/root/.ollama
@@ -170,10 +171,13 @@ services:
     volumes:
       - ./config/litellm-config.yaml:/app/config.yaml:ro
       - ./config/litellm-callbacks.py:/app/litellm_callbacks.py:ro
+      - ./config/litellm-diagnostic.py:/app/litellm_diagnostic.py:ro  # TEMP: header discovery
     environment:
       # Core
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - LITELLM_SALT_KEY=${LITELLM_SALT_KEY}
+      - UI_USERNAME=${UI_USERNAME}
+      - UI_PASSWORD=${UI_PASSWORD}
       - DATABASE_URL=postgresql://${DATABASE_USER:-postgres}:${DATABASE_PASSWORD}@postgres:5432/litellm
       - STORE_MODEL_IN_DB=true
 
@@ -210,7 +214,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 3G
+          memory: 4G
           cpus: '2'
     networks:
       - owui-network
@@ -373,7 +377,7 @@ services:
       - owui-network
 
   open-webui:
-    image: ghcr.io/jlgill/gillson-open-webui:v0.9.6
+    image: ghcr.io/jlgill/gillson-open-webui:v0.10.2
     container_name: owui-app
     depends_on:
       postgres:
@@ -442,7 +446,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 6G
           cpus: '4'
     secrets:
       - webui_secret_key
@@ -465,7 +469,7 @@ services:
       resources:
         limits:
           memory: 4G
-          cpus: '4'
+          cpus: '2'
     networks:
       - owui-network
 
@@ -509,6 +513,59 @@ services:
     networks:
       - owui-network
 
+  playwright-mcp:
+    # Playwright MCP server — exposes browser automation tools (navigate, click,
+    # fill, snapshot) as MCP tools. OWUI connects DIRECTLY via native MCP
+    # (Streamable HTTP, supported since v0.6.31) — NOT proxied through mcpo.
+    # Register in OWUI: Admin → External Tools → + → Type: MCP (Streamable HTTP)
+    #   URL: http://playwright-mcp:8931/mcp, Auth: None
+    # DISTINCT from docker-compose.playwright.yaml web-loader (playwright
+    # run-server WS:3000 for RAG). This runs @playwright/mcp HTTP/SSE:8931 for
+    # tool calls. Different npm package, different protocol, different port.
+    # Login persistence: --user-data-dir + named volume keeps cookies/logins
+    # across restarts. Required for job-site auth (LinkedIn, Greenhouse, etc.).
+    image: mcr.microsoft.com/playwright:v1.60.0-noble # Must match requirements.txt
+    container_name: owui-playwright-mcp
+    restart: unless-stopped
+    # @playwright/mcp pinned to v0.0.72 which bundles Playwright 1.60.0-alpha,
+    # matching the v1.60.0-noble image's pre-installed browsers. Using @latest
+    # pulls 1.62-alpha which expects different browser binaries. Bump both
+    # together when upgrading: image tag + @playwright/mcp version + requirements.txt.
+    # --executable-path points to the bundled Chromium (not Chrome channel).
+    # NOTE: update the chromium-NNNN path if the image's browser version changes.
+    # --caps vision adds screenshot/coordinate-based tools (browser_screen_*) on top
+    # of the default a11y-snapshot tools. Needed for job sites that obfuscate their
+    # DOM to break automation (LinkedIn/Workday) where the a11y tree is insufficient.
+    # Trade-off: screenshots consume image tokens — only used when snapshot tools fail.
+    command: >-
+      npx -y @playwright/mcp@0.0.72
+      --port 8931 --host 0.0.0.0 --headless
+      --allowed-hosts '*'
+      --caps vision
+      --executable-path /ms-playwright/chromium-1223/chrome-linux64/chrome
+      --user-data-dir /root/.playwright-mcp
+    volumes:
+      - playwright-mcp-profile:/root/.playwright-mcp
+    ports:
+      # Internal-only — mcpo reaches via owui-network DNS. Host mapping for debugging.
+      - "127.0.0.1:8931:8931"
+    healthcheck:
+      # /mcp returns HTTP 400 on bare GET (correct — needs protocol headers).
+      # /sse hangs curl (SSE is a streaming connection). Without -f, curl exits 0
+      # on any HTTP response incl. 400. --max-time 5 prevents hang if server stalls.
+      test: ["CMD-SHELL", "curl -s --max-time 5 -o /dev/null http://localhost:8931/mcp"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2'
+    networks:
+      - owui-network
+
   cloudflared:
     image: cloudflare/cloudflared:2026.6.0
     container_name: owui-cloudflared
@@ -546,6 +603,7 @@ volumes:
   clickhouse-logs:
   minio-data:
   mcpo-tokens:
+  playwright-mcp-profile:
 
 networks:
   owui-network:
