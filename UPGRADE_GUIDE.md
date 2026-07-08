@@ -356,6 +356,15 @@ Key variables in `docker-compose.prod.yaml`:
 | Weekly | Full volume backup |
 | Before upgrades | Database dump + verify |
 
+### Critical Volumes (must back up)
+
+| Volume | Service | Why |
+|--------|---------|-----|
+| `mcpo-tokens` | `owui-mcpo` | OAuth tokens for MCP servers (ClickUp). Losing it = re-auth ceremony. |
+| `playwright-mcp-profile` | `owui-playwright-mcp` | Browser user-data-dir with cookies/login sessions for job sites (LinkedIn, Greenhouse, Workday). Losing it = re-auth on every site. |
+
+> These volumes are not covered by `pg_dump`. Back them up with `docker run --rm -v <volume>:/data -v $(pwd)/backups:/backup alpine tar czf /backup/<volume>_<date>.tar.gz -C /data .`
+
 ### Automated Backup Script (Optional)
 
 Create `backup.ps1`:
