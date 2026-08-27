@@ -8,6 +8,8 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
+    tags:
+      - 'v*'  # Version tags (e.g. v0.11.1) trigger a version-tagged image build
 
 env:
   REGISTRY: ghcr.io
@@ -46,6 +48,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,prefix=
             type=raw,value={{date 'YYYYMMDD-HHmmss'}}
+            type=ref,event=tag  # On v* tags, publish an image tagged with the tag name (e.g. v0.11.1)
 
       - name: Build and push
         uses: docker/build-push-action@v5
