@@ -1,4 +1,3 @@
-import json
 import time
 import uuid
 from functools import lru_cache
@@ -8,8 +7,9 @@ from open_webui.internal.db import Base, get_async_db_context
 from open_webui.models.access_grants import AccessGrantModel, AccessGrants
 from open_webui.models.groups import Groups
 from open_webui.models.users import User, UserModel, UserResponse, Users
-from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import JSON, BigInteger, Boolean, Column, ForeignKey, Text, and_, cast, delete, func, or_, select, update
+from open_webui.utils.json_codec import JSONCodec
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import JSON, BigInteger, Boolean, Column, ForeignKey, Text, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 ####################
@@ -31,6 +31,32 @@ class Note(Base):
     updated_at = Column(BigInteger)
 
 
+def sanitize_note_data(data: Optional[dict]) -> Optional[dict]:
+    """Sanitize malformed note.data so content.md is always markdown text."""
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        return {'content': {'md': str(data)}}
+
+    content = data.get('content')
+    if not isinstance(content, dict) or 'md' not in content or isinstance(content.get('md'), str):
+        return data
+
+    md = content.get('md') if content.get('md') is not None else ''
+    if isinstance(md, (dict, list)):
+        md = f'```json\n{JSONCodec.dumps(md, indent=2, ensure_ascii=False)}\n```'
+    else:
+        md = str(md)
+
+    return {
+        **data,
+        'content': {
+            **content,
+            'md': md,
+        },
+    }
+
+
 class NoteModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -46,6 +72,11 @@ class NoteModel(BaseModel):
 
     created_at: int  # timestamp in epoch
     updated_at: int  # timestamp in epoch
+
+    @field_validator('data', mode='before')
+    @classmethod
+    def sanitize_data(cls, data):
+        return sanitize_note_data(data)
 
 
 class PinnedNote(Base):
@@ -68,12 +99,22 @@ class NoteForm(BaseModel):
     meta: Optional[dict] = None
     access_grants: Optional[list[dict]] = None
 
+    @field_validator('data', mode='before')
+    @classmethod
+    def sanitize_data(cls, data):
+        return sanitize_note_data(data)
+
 
 class NoteUpdateForm(BaseModel):
     title: Optional[str] = None
     data: Optional[dict] = None
     meta: Optional[dict] = None
     access_grants: Optional[list[dict]] = None
+
+    @field_validator('data', mode='before')
+    @classmethod
+    def sanitize_data(cls, data):
+        return sanitize_note_data(data)
 
 
 class NoteUserResponse(NoteModel):
@@ -171,28 +212,23 @@ class NoteTable:
             if filter:
                 query_key = filter.get('query')
                 if query_key:
-                    # Split query into individual terms and normalize each
-                    # (e.g., ""PA-450 firewall status"" matches notes containing all three terms)
-                    # Hyphen removal preserves ""todo"" matching ""to-do"" and ""to do""
-                    terms = [t.replace('-', '') for t in query_key.split() if t.strip()]
-                    if terms:
-                        normalized_title = func.replace(func.replace(Note.title, '-', ''), ' ', '')
-                        normalized_content = func.replace(
-                            func.replace(cast(Note.data['content']['md'], Text), '-', ''),
-                            ' ',
-                            '',
-                        )
+                    # Split query into individual words and normalize each
+                    # (strip hyphens so "todo" matches "to-do").
+                    # All words must match somewhere in title OR content (AND semantics).
+                    search_words = query_key.split()
+                    normalized_words = [w.replace('-', '') for w in search_words if w.replace('-', '')]
+                    for word in normalized_words:
                         stmt = stmt.filter(
-                            and_(
-                                *[
-                                    or_(
-                                        normalized_title.ilike(f'%{term}%'),
-                                        normalized_content.ilike(f'%{term}%'),
-                                    )
-                                    for term in terms
-                                ]
+                            or_(
+                                func.replace(func.replace(Note.title, '-', ''), ' ', '').ilike(f'%{word}%'),
+                                func.replace(
+                                    func.replace(Note.data['content']['md'].as_string(), '-', ''),
+                                    ' ',
+                                    '',
+                                ).ilike(f'%{word}%'),
                             )
                         )
+
                 view_option = filter.get('view_option')
                 if view_option == 'created':
                     stmt = stmt.filter(Note.user_id == user_id)
@@ -310,6 +346,7 @@ class NoteTable:
                 return None
 
             form_data = form_data.model_dump(exclude_unset=True)
+            note.data = sanitize_note_data(note.data) or {}
 
             if 'title' in form_data:
                 note.title = form_data['title']
@@ -398,5 +435,3 @@ class NoteTable:
 
 
 Notes = NoteTable()
-
-
