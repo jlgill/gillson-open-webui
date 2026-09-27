@@ -21,7 +21,7 @@
 # ===========================================
 services:
   postgres:
-    image: postgres:16.13
+    image: postgres:16.15
     container_name: owui-postgres
     restart: unless-stopped
     environment:
@@ -44,7 +44,7 @@ services:
       - owui-network
 
   ollama:
-    image: ollama/ollama:${OLLAMA_DOCKER_TAG:-0.30.11}
+    image: ollama/ollama:${OLLAMA_DOCKER_TAG:-0.34.0}
     container_name: owui-ollama
     volumes:
       - ollama:/root/.ollama
@@ -71,7 +71,7 @@ services:
     - "127.0.0.1:11434:11434" # Expose Ollama API port for VS Code (localhost only)
 
   llama-swap:
-    image: ghcr.io/mostlygeek/llama-swap:${LLAMA_SWAP_DOCKER_TAG:-unified-cuda-2026-06-09}
+    image: ghcr.io/mostlygeek/llama-swap:${LLAMA_SWAP_DOCKER_TAG:-unified-cuda-2026-08-15}
     container_name: owui-llamacpp
     restart: unless-stopped
     volumes:
@@ -157,7 +157,7 @@ services:
   litellm:
     # LLM gateway / OpenAI-compatible proxy fronting Azure Foundry, OpenAI,
     # Ollama, and llama-swap. UI + spend logs require the -database variant.
-    image: ghcr.io/berriai/litellm-database:v1.89.3
+    image: ghcr.io/berriai/litellm-database:v1.100.1
     container_name: owui-litellm
     restart: unless-stopped
     depends_on:
@@ -254,7 +254,7 @@ services:
       - owui-network
 
   redis:
-    image: redis:7.4.6-alpine
+    image: redis:7.4.11-alpine
     container_name: owui-redis
     restart: unless-stopped
     command: ["redis-server", "--requirepass", "${REDIS_AUTH}", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
@@ -298,7 +298,7 @@ services:
       - owui-network
 
   langfuse-worker:
-    image: langfuse/langfuse-worker:3.180.0
+    image: langfuse/langfuse-worker:3.225.7
     container_name: owui-langfuse-worker
     restart: unless-stopped
     depends_on:
@@ -347,7 +347,7 @@ services:
       - owui-network
 
   langfuse-web:
-    image: langfuse/langfuse:3.180.0
+    image: langfuse/langfuse:3.225.7
     container_name: owui-langfuse
     restart: unless-stopped
     depends_on:
@@ -377,7 +377,7 @@ services:
       - owui-network
 
   open-webui:
-    image: ghcr.io/jlgill/gillson-open-webui:v0.10.2
+    image: ghcr.io/jlgill/gillson-open-webui:v0.11.4-gillson
     container_name: owui-app
     depends_on:
       postgres:
@@ -404,6 +404,20 @@ services:
       - WEBUI_AUTH=true
       - WEBUI_SESSION_COOKIE_SECURE=true
       
+      #OWUI Configuration
+      - ENABLE_KB_EXEC=True
+      - RAG_SYSTEM_CONTEXT=True
+      # Cap native tool-call iterations per response (upstream default 256; parallel
+      # calls in one turn count as one iteration). Applies on next container recreate.
+      - CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS=40
+
+      # Performance
+      - ENABLE_ORJSON=true
+      - UVICORN_WS_PER_MESSAGE_DEFLATE=false
+
+      # Retrieval
+      - ENABLE_RAG_CSV_SUMMARY=true
+
       # Ollama
       - OLLAMA_BASE_URL=http://ollama:11434
       
@@ -452,19 +466,30 @@ services:
       - webui_secret_key
     networks:
       - owui-network
+      - outline-net
 
   open-terminal:
-    image: ghcr.io/open-webui/open-terminal:0.11.34
+    image: ghcr.io/open-webui/open-terminal:0.12.5
     container_name: owui-terminal
     restart: unless-stopped
     environment:
       - OPEN_TERMINAL_API_KEY_FILE=/run/secrets/open_terminal_api_key
       - OPEN_TERMINAL_MULTI_USER=true
+      # Morning Standup automation: scripts/morning-standup/fetch_clickup_standup.py
+      # pulls ClickUp tasks via mcpo (or the REST API when a token is present) so no
+      # task payload ever passes through the LLM.
+      - MCPO_URL=http://owui-mcpo:8000/clickup
+      - MCPO_API_KEY_FILE=/run/secrets/mcpo_api_key
+      # Optional: put a ClickUp personal token in ./secrets/clickup_api_token.txt,
+      # declare it under top-level secrets: and in this service, then enable:
+      # - CLICKUP_API_TOKEN_FILE=/run/secrets/clickup_api_token
     volumes:
       - open-terminal:/data
       - open-terminal-home:/home
+      - ./scripts/morning-standup:/opt/morning-standup:ro
     secrets:
       - open_terminal_api_key
+      - mcpo_api_key
     deploy:
       resources:
         limits:
@@ -524,12 +549,11 @@ services:
     # tool calls. Different npm package, different protocol, different port.
     # Login persistence: --user-data-dir + named volume keeps cookies/logins
     # across restarts. Required for job-site auth (LinkedIn, Greenhouse, etc.).
-    image: mcr.microsoft.com/playwright:v1.60.0-noble # Must match requirements.txt
+    image: mcr.microsoft.com/playwright:v1.62.0-noble # Must match requirements.txt
     container_name: owui-playwright-mcp
     restart: unless-stopped
-    # @playwright/mcp pinned to v0.0.72 which bundles Playwright 1.60.0-alpha,
-    # matching the v1.60.0-noble image's pre-installed browsers. Using @latest
-    # pulls 1.62-alpha which expects different browser binaries. Bump both
+    # @playwright/mcp pinned to v0.0.78 which bundles Playwright 1.62.0-alpha,
+    # matching the v1.62.0-noble image's pre-installed browsers. Bump both
     # together when upgrading: image tag + @playwright/mcp version + requirements.txt.
     # --executable-path points to the bundled Chromium (not Chrome channel).
     # NOTE: update the chromium-NNNN path if the image's browser version changes.
@@ -538,11 +562,11 @@ services:
     # DOM to break automation (LinkedIn/Workday) where the a11y tree is insufficient.
     # Trade-off: screenshots consume image tokens — only used when snapshot tools fail.
     command: >-
-      npx -y @playwright/mcp@0.0.72
+      npx -y @playwright/mcp@0.0.78
       --port 8931 --host 0.0.0.0 --headless
       --allowed-hosts '*'
       --caps vision
-      --executable-path /ms-playwright/chromium-1223/chrome-linux64/chrome
+      --executable-path /ms-playwright/chromium-1234/chrome-linux64/chrome
       --user-data-dir /root/.playwright-mcp
     volumes:
       - playwright-mcp-profile:/root/.playwright-mcp
@@ -566,8 +590,43 @@ services:
     networks:
       - owui-network
 
+  # Playwright run-server — exposes the raw browser over WebSocket (CDP-over-WS)
+  # for OWUI's WEB_LOADER_ENGINE=playwright (RAG document fetching). DISTINCT
+  # from playwright-mcp above: different npm package (`playwright` vs
+  # `@playwright/mcp`), different protocol (WS CDP vs MCP JSON-RPC), different
+  # port (3000 vs 8931), different purpose (RAG ingestion vs agentic tools).
+  # SafePlaywrightURLLoader in retrieval/web/utils.py connects via
+  # p.chromium.connect(ws://playwright:3000) — must speak the Playwright WS
+  # protocol, NOT MCP. Image tag MUST match the playwright Python pkg version
+  # installed in the owui-app image (currently 1.60.0 — the running image was
+  # built before requirements.txt was bumped to 1.62.0). When owui-app is
+  # rebuilt with playwright==1.62.0, bump this to v1.62.0-noble to match.
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.60.0-noble
+    container_name: owui-playwright-loader
+    restart: unless-stopped
+    command: npx -y playwright@1.60.0 run-server --port 3000 --host 0.0.0.0
+    # No host port mapping: Grafana already binds 127.0.0.1:3000. owui-app
+    # reaches this via owui-network DNS as ws://playwright:3000.
+    healthcheck:
+      # run-server responds on the WS endpoint; a bare HTTP GET returns 400
+      # (missing WS upgrade headers) which is the healthy signal. Without -f,
+      # curl exits 0 on any HTTP response incl. 400.
+      test: ["CMD-SHELL", "curl -s --max-time 5 -o /dev/null http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2'
+    networks:
+      - owui-network
+
   cloudflared:
-    image: cloudflare/cloudflared:2026.6.0
+    image: cloudflare/cloudflared:2026.9.1
     container_name: owui-cloudflared
     restart: unless-stopped
     command: tunnel --protocol http2 run  # http2 required due to QUIC/UDP buffer issues in Docker
@@ -608,4 +667,7 @@ volumes:
 networks:
   owui-network:
     driver: bridge
+  outline-net:
+    name: outline_default
+    external: true
 

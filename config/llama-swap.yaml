@@ -85,6 +85,18 @@ models:
       --cache-type-k q8_0 --cache-type-v q8_0
       --spec-type draft-mtp --spec-draft-n-max 2
 
+  qwen3.8-27b:
+    aliases:
+      - qwen3.8:27b
+    cmd: >
+      llama-server --host 0.0.0.0 --port ${PORT}
+      --model /models/qwen3.8-27b/Qwen3.8-27B-IQ4_XS.gguf
+      --mmproj /models/qwen3.8-27b/mmproj-BF16.gguf
+      --no-mmproj-offload
+      --n-gpu-layers -1 --parallel 1 --ctx-size 16384
+      -fa on --jinja
+      --cache-type-k q8_0 --cache-type-v q8_0
+
 matrix:
   vars:
     g4: gemma4-e4b
@@ -96,6 +108,7 @@ matrix:
     q2: qwen3.5-2b
     q08: qwen3.5-0.8b
     q27: qwen3.6-27b
+    q38: qwen3.8-27b
 
   sets:
-    single: "g4 | d7 | d14 | qc14 | q9 | q4 | q2 | q08 | q27"
+    single: "g4 | d7 | d14 | qc14 | q9 | q4 | q2 | q08 | q27 | q38"
