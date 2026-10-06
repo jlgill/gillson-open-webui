@@ -2,9 +2,9 @@
 title: Langfuse Filter
 author: gillson (derived from open-webui Langfuse pipeline v4)
 author_url: https://github.com/jlgill
-version: 1.0.0
+version: 1.1.0
 license: MIT
-required_open_webui_version: 0.6.41
+required_open_webui_version: 0.10.0
 requirements: langfuse==3.15.0
 description: >
   In-process Langfuse v3 tracing Filter Function for Open WebUI. Modern replacement for
@@ -48,6 +48,57 @@ RETRIEVER_TOOL_NAMES = {
 OPENAI_SERVER_TOOL_NAMES = {"web_search_call", "file_search_call", "computer_call"}
 # Compiled once: matches Open WebUI <details> HTML tool-call blocks embedded in assistant messages.
 _OWUI_DETAILS_RE = re.compile(r"<details\b[^>]*>.*?</details>", re.DOTALL | re.IGNORECASE)
+
+# ---------------------------------------------------------------------------
+# Hardcoded constants (previously valves).
+#
+# These values almost never change between deployments. They live here as
+# module-level constants so they're easy to find and adjust, and trivial to
+# re-promote to a valve later if a real per-deployment need arises. See the
+# "Valves vs constants" section of the changelog for the rationale.
+# ---------------------------------------------------------------------------
+
+# Trace identity — tracks the code version; do NOT expose as a valve or it
+# will drift from the actual code.
+_TRACE_VERSION = "open-webui-langfuse-function-v1.1"
+
+# Langfuse observation levels. Map to DEBUG/DEFAULT/WARNING/ERROR.
+_LEVEL_DEFAULT = "DEFAULT"
+_LEVEL_USER_EVENT = "DEFAULT"
+_LEVEL_TOOL = "DEFAULT"
+_LEVEL_RETRIEVER = "DEFAULT"
+_LEVEL_REASONING = "DEBUG"
+_LEVEL_ERROR = "ERROR"
+_LEVEL_GUARDRAIL = "WARNING"
+
+# Root observation types (Langfuse observation *types*, not free-form labels).
+_ROOT_TYPE_AGENT = "agent"
+_ROOT_TYPE_RAG = "chain"
+_ROOT_TYPE_UTILITY = "span"
+_ROOT_TYPE_CHAT = "span"
+
+# Masking — granular toggles collapsed under the master `enable_masking` valve.
+_MASK_EMAILS = True
+_MASK_PHONE_NUMBERS = True
+_MASK_API_KEYS = True
+_MASK_REPLACEMENT = "[REDACTED]"
+
+# Size/throughput guards.
+_MAX_FIELD_CHARS = 20000
+_MAX_COLLECTION_ITEMS = 200
+_STREAM_CHARS_PER_TOKEN = 4.0
+
+# Structural toggles — the whole point of the observation structure.
+_INSERT_TAGS = True
+_GROUP_RAG_AS_CHAIN = True
+_EMIT_GUARDRAIL_OBSERVATION = True
+
+# Background-task names that should be classified as utility (span) roots.
+_BACKGROUND_TASKS = (
+    "title_generation,follow_up_generation,tags_generation,emoji_generation,"
+    "query_generation,image_prompt_generation,autocomplete_generation,"
+    "function_calling,moa_response_generation"
+)
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -126,29 +177,20 @@ def first_present(data: dict, keys: List[str]) -> Optional[Any]:
 
 class Filter:
     class Valves(BaseModel):
+        # --- Connection (per-deployment) ---
         priority: int = 0
-
         secret_key: str = os.getenv("LANGFUSE_SECRET_KEY", "your-secret-key-here")
         public_key: str = os.getenv("LANGFUSE_PUBLIC_KEY", "your-public-key-here")
         host: str = os.getenv("LANGFUSE_HOST", os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com"))
-
         enabled: bool = env_bool("LANGFUSE_FILTER_ENABLED", True)
         debug: bool = env_bool("DEBUG_MODE", False)
-        insert_tags: bool = True
-        use_model_name_instead_of_id_for_generation: bool = env_bool("USE_MODEL_NAME", False)
 
-        trace_version: str = "open-webui-langfuse-function-v1"
+        # --- Langfuse project context (varies per deploy) ---
         environment: str | None = os.getenv("LANGFUSE_TRACING_ENVIRONMENT")
         release: str | None = os.getenv("LANGFUSE_RELEASE")
         sample_rate: float = env_float("LANGFUSE_SAMPLE_RATE", 1.0)
 
-        default_level: str = "DEFAULT"
-        user_event_level: str = "DEFAULT"
-        tool_level: str = "DEFAULT"
-        retriever_level: str = "DEFAULT"
-        reasoning_level: str = "DEBUG"
-        error_level: str = "ERROR"
-
+        # --- Capture toggles (privacy/cost/compliance) ---
         capture_inputs: bool = True
         capture_outputs: bool = True
         capture_tool_arguments: bool = True
@@ -158,50 +200,51 @@ class Filter:
         capture_code_interpreter: bool = True
         capture_multimodal: bool = False
 
+        # --- Masking ---
         enable_masking: bool = True
-        mask_emails: bool = True
-        mask_phone_numbers: bool = True
-        mask_api_keys: bool = True
         mask_metadata_keys: str = (
-            "authorization,cookie,set-cookie,api_key,secret_key,access_token," "refresh_token,password,token,key"
+            "authorization,cookie,set-cookie,api_key,secret_key,access_token,refresh_token,password,token,key"
         )
-        mask_replacement: str = "[REDACTED]"
-        max_field_chars: int = env_int("LANGFUSE_MAX_FIELD_CHARS", 20000)
-        max_collection_items: int = env_int("LANGFUSE_MAX_COLLECTION_ITEMS", 200)
-        flush_on_outlet: bool = env_bool("LANGFUSE_FLUSH_ON_OUTLET", False)
 
-        # --- Root observation type heuristic ---
-        background_tasks: str = (
-            "title_generation,follow_up_generation,tags_generation,emoji_generation,"
-            "query_generation,image_prompt_generation,autocomplete_generation,"
-            "function_calling,moa_response_generation"
-        )
-        agentic_root_type: str = "agent"
-        rag_root_type: str = "chain"
-        utility_root_type: str = "span"
-        chat_root_type: str = "span"
-
-        group_rag_as_chain: bool = True
-
-        emit_guardrail_observation: bool = True
-        guardrail_level: str = "WARNING"
-
-        # --- stream() telemetry ---
+        # --- Ergonomics / perf escape hatches ---
+        use_model_name_instead_of_id_for_generation: bool = env_bool("USE_MODEL_NAME", False)
         capture_stream_metrics: bool = True
-        stream_chars_per_token: float = 4.0
-
-        # --- OTEL coexistence ---
-        # When OWUI runs its own OpenTelemetry (ENABLE_OTEL=true), the langfuse v3
-        # SDK would otherwise reuse OWUI's GLOBAL TracerProvider and attach its span
-        # processor to it, exporting every OWUI app/infra span (DB queries, /health
-        # probes) into Langfuse. Giving langfuse its OWN isolated TracerProvider keeps
-        # the two tracing systems separate. Leave True unless you explicitly want
-        # langfuse to share OWUI's provider.
+        flush_on_outlet: bool = env_bool("LANGFUSE_FLUSH_ON_OUTLET", False)
         isolate_tracer_provider: bool = True
+
+        # --- Background-task root-type list (changes as OWUI adds tasks) ---
+        background_tasks: str = _BACKGROUND_TASKS
 
     def __init__(self):
         self.name = "Langfuse Filter"
         self.valves = self.Valves()
+
+        # Hardcoded constants (see module-level definitions). Exposed as instance
+        # attributes so the rest of the class reads `self._LEVEL_*` etc., matching
+        # the pre-refactor pattern. Re-promote to a valve only if a real per-deployment
+        # need arises.
+        self._trace_version = _TRACE_VERSION
+        self._level_default = _LEVEL_DEFAULT
+        self._level_user_event = _LEVEL_USER_EVENT
+        self._level_tool = _LEVEL_TOOL
+        self._level_retriever = _LEVEL_RETRIEVER
+        self._level_reasoning = _LEVEL_REASONING
+        self._level_error = _LEVEL_ERROR
+        self._level_guardrail = _LEVEL_GUARDRAIL
+        self._root_type_agent = _ROOT_TYPE_AGENT
+        self._root_type_rag = _ROOT_TYPE_RAG
+        self._root_type_utility = _ROOT_TYPE_UTILITY
+        self._root_type_chat = _ROOT_TYPE_CHAT
+        self._mask_emails = _MASK_EMAILS
+        self._mask_phone_numbers = _MASK_PHONE_NUMBERS
+        self._mask_api_keys = _MASK_API_KEYS
+        self._mask_replacement = _MASK_REPLACEMENT
+        self._max_field_chars = _MAX_FIELD_CHARS
+        self._max_collection_items = _MAX_COLLECTION_ITEMS
+        self._stream_chars_per_token = _STREAM_CHARS_PER_TOKEN
+        self._insert_tags = _INSERT_TAGS
+        self._group_rag_as_chain = _GROUP_RAG_AS_CHAIN
+        self._emit_guardrail_observation = _EMIT_GUARDRAIL_OBSERVATION
 
         self.langfuse: Optional[Langfuse] = None
         # trace_id -> perf_counter() captured at inlet (TTFT base + end-to-end latency
@@ -344,13 +387,13 @@ class Filter:
     def _resolve_root_type(self, task_name: str, body: dict) -> str:
         background = {t.strip() for t in self.valves.background_tasks.split(",") if t.strip()}
         if task_name in background:
-            return self.valves.utility_root_type
+            return self._root_type_utility
         if body.get("tools"):
-            return self.valves.agentic_root_type
+            return self._root_type_agent
         metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
         if body.get("files") or metadata.get("folder_knowledge"):
-            return self.valves.rag_root_type
-        return self.valves.chat_root_type
+            return self._root_type_rag
+        return self._root_type_chat
 
     # ----------------------------------------------------------------- masking
     def _mask_keys(self) -> set[str]:
@@ -370,17 +413,17 @@ class Filter:
             if n:
                 counts["data_uris"] = n
 
-        if self.valves.mask_emails:
+        if self._mask_emails:
             n = len(re.findall(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", text))
             if n:
                 counts["emails"] = n
 
-        if self.valves.mask_phone_numbers:
+        if self._mask_phone_numbers:
             n = len(re.findall(r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b", text))
             if n:
                 counts["phone_numbers"] = n
 
-        if self.valves.mask_api_keys:
+        if self._mask_api_keys:
             api_key_count = (
                 len(re.findall(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", text, flags=re.I))
                 + len(re.findall(r"\b(?:sk|pk)-[A-Za-z0-9][A-Za-z0-9_-]{12,}\b", text))
@@ -393,7 +436,7 @@ class Filter:
         return counts
 
     def _mask_string(self, value: str) -> str:
-        replacement = self.valves.mask_replacement
+        replacement = self._mask_replacement
         result = value
 
         if not self.valves.capture_multimodal:
@@ -403,19 +446,19 @@ class Filter:
                 result,
             )
 
-        if self.valves.mask_emails:
+        if self._mask_emails:
             result = re.sub(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", replacement, result)
 
-        if self.valves.mask_phone_numbers:
+        if self._mask_phone_numbers:
             result = re.sub(r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b", replacement, result)
 
-        if self.valves.mask_api_keys:
+        if self._mask_api_keys:
             result = re.sub(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", f"Bearer {replacement}", result, flags=re.I)
             result = re.sub(r"\b(?:sk|pk)-[A-Za-z0-9][A-Za-z0-9_-]{12,}\b", replacement, result)
             result = re.sub(r"\b(?:sk|pk)-lf-[A-Za-z0-9_-]{12,}\b", replacement, result)
             result = re.sub(r"\bsk-ant-[A-Za-z0-9_-]{12,}\b", replacement, result)
 
-        max_chars = max(self.valves.max_field_chars, 0)
+        max_chars = max(self._max_field_chars, 0)
         if max_chars and len(result) > max_chars:
             result = f"{result[:max_chars]}... [TRUNCATED {len(result) - max_chars} chars]"
 
@@ -437,21 +480,21 @@ class Filter:
         if isinstance(data, dict):
             output = {}
             for index, (key, value) in enumerate(data.items()):
-                if index >= self.valves.max_collection_items:
-                    output["__truncated_items__"] = len(data) - self.valves.max_collection_items
+                if index >= self._max_collection_items:
+                    output["__truncated_items__"] = len(data) - self._max_collection_items
                     break
                 key_string = str(key)
                 if self.valves.enable_masking and self._should_mask_key(key_string):
-                    output[key_string] = self.valves.mask_replacement
+                    output[key_string] = self._mask_replacement
                 else:
                     output[key_string] = self._safe_data(value, depth + 1)
             return output
 
         if isinstance(data, (list, tuple, set)):
             items = list(data)
-            output = [self._safe_data(value, depth + 1) for value in items[: self.valves.max_collection_items]]
-            if len(items) > self.valves.max_collection_items:
-                output.append({"__truncated_items__": len(items) - self.valves.max_collection_items})
+            output = [self._safe_data(value, depth + 1) for value in items[: self._max_collection_items]]
+            if len(items) > self._max_collection_items:
+                output.append({"__truncated_items__": len(items) - self._max_collection_items})
             return output
 
         return self._mask_string(str(data))
@@ -459,7 +502,7 @@ class Filter:
     # --------------------------------------------------------------- id helpers
     def _build_tags(self, task_name: str, extra_tags: Optional[List[str]] = None) -> List[str]:
         tags: List[str] = []
-        if self.valves.insert_tags:
+        if self._insert_tags:
             tags.extend(["open-webui", "langfuse-function"])
             if task_name and task_name not in {"user_response", "llm_response"}:
                 tags.append(task_name)
@@ -603,7 +646,7 @@ class Filter:
         return {
             "interface": "open-webui",
             "plugin": "langfuse-filter-function",
-            "plugin_version": self.valves.trace_version,
+            "plugin_version": self._trace_version,
             "chat_id": chat_id,
             # Langfuse session = one persistent OWUI chat (chat_id), so every turn in a
             # chat groups into a single session. OWUI's `session_id` is the Socket.IO
@@ -1057,12 +1100,12 @@ class Filter:
                             else {"omitted": True, "content_length": len(output_text)}
                         ),
                         "level": (
-                            self.valves.error_level
+                            self._level_error
                             if self._is_error_output(item, output_text)
                             else (
-                                self.valves.retriever_level
+                                self._level_retriever
                                 if observation_type == "retriever"
-                                else self.valves.tool_level
+                                else self._level_tool
                             )
                         ),
                         "metadata": {
@@ -1086,9 +1129,9 @@ class Filter:
                         "input": item.get("action") or item.get("queries") or item,
                         "output": output_text,
                         "level": (
-                            self.valves.error_level
+                            self._level_error
                             if self._is_error_output(item, output_text)
-                            else self.valves.tool_level
+                            else self._level_tool
                         ),
                         "metadata": {
                             "tool_name": item_type,
@@ -1107,7 +1150,7 @@ class Filter:
                         "as_type": "span",
                         "input": item.get("attributes") or {},
                         "output": reasoning_text,
-                        "level": self.valves.reasoning_level,
+                        "level": self._level_reasoning,
                         "metadata": {
                             "status": item.get("status"),
                             "duration": item.get("duration"),
@@ -1129,9 +1172,9 @@ class Filter:
                         },
                         "output": output_text,
                         "level": (
-                            self.valves.error_level
+                            self._level_error
                             if self._is_error_output(item, output_text)
-                            else self.valves.tool_level
+                            else self._level_tool
                         ),
                         "metadata": {
                             "status": item.get("status"),
@@ -1209,7 +1252,7 @@ class Filter:
                         if self.valves.capture_retriever_outputs
                         else {"omitted": True, "document_count": len(documents)}
                     ),
-                    "level": self.valves.retriever_level,
+                    "level": self._level_retriever,
                     "metadata": {
                         "source_index": index,
                         "source_id": source_info.get("id"),
@@ -1256,7 +1299,7 @@ class Filter:
         ttft = (state["first"] - start) if start else None
         duration = max(state.get("last", state["first"]) - state["first"], 0.0)
         chars = int(state.get("chars", 0))
-        divisor = self.valves.stream_chars_per_token or 4.0
+        divisor = self._stream_chars_per_token or 4.0
         est_tokens = int(chars / divisor) if divisor else None
 
         output: Dict[str, Any] = {
@@ -1275,7 +1318,7 @@ class Filter:
             name="stream",
             output_data=output,
             metadata={"observation_source": "function_stream"},
-            level=self.valves.default_level,
+            level=self._level_default,
         )
 
     # --------------------------------------------------------------------- inlet
@@ -1330,7 +1373,7 @@ class Filter:
                 name="user_input",
                 input_data=user_message if user_message else None,
                 metadata={**trace_metadata, "observation_source": "function_inlet"},
-                level=self.valves.user_event_level,
+                level=self._level_user_event,
             )
             # Seed trace-level attributes early so the trace is usable even if outlet
             # never runs (e.g. direct API callers that skip /api/chat/completed).
@@ -1417,6 +1460,17 @@ class Filter:
         # the raw content is still used below for PII scanning.
         clean_assistant_message = self._clean_assistant_text(assistant_message)
         output_items = assistant_message_obj.get("output") if assistant_message_obj else None
+        # OWUI 0.10.x saves only structured `output` (not string `content`) to the DB for
+        # assistant turns, so `message["content"]` comes back as "" for persistent chats.
+        # Fall back to reconstructing the visible text from the `message`-type items in
+        # `output_items` so the generation observation's output is populated.
+        if not clean_assistant_message and isinstance(output_items, list):
+            text_parts = [
+                self._output_item_text(item)
+                for item in output_items
+                if isinstance(item, dict) and item.get("type") == "message"
+            ]
+            clean_assistant_message = "\n".join(p for p in text_parts if p) or None
         usage_raw = assistant_message_obj.get("usage") if assistant_message_obj else None
         usage_details, cost_details = self._extract_usage_details(usage_raw)
 
@@ -1434,11 +1488,11 @@ class Filter:
         has_tool_calls = bool(tool_observations or server_tool_observations or code_observations)
         has_sources = bool(source_observations)
         if task_name in {t.strip() for t in self.valves.background_tasks.split(",") if t.strip()}:
-            root_type = self.valves.utility_root_type
+            root_type = self._root_type_utility
         elif has_tool_calls:
-            root_type = self.valves.agentic_root_type
+            root_type = self._root_type_agent
         elif has_sources:
-            root_type = self.valves.rag_root_type
+            root_type = self._root_type_rag
         else:
             root_type = self._resolve_root_type(task_name, body)
 
@@ -1478,7 +1532,7 @@ class Filter:
                 name=trace_name,
                 input_data=safe_input,
                 metadata=trace_metadata,
-                level=self.valves.default_level,
+                level=self._level_default,
             )
         except Exception as e:
             self.log(f"Failed to create root observation: {e}", force=True)
@@ -1502,7 +1556,7 @@ class Filter:
         # Tools / server-tools / code: directly under root.
         for observation in [*tool_observations, *server_tool_observations, *code_observations]:
             status_message = None
-            if observation.get("level") == self.valves.error_level:
+            if observation.get("level") == self._level_error:
                 status_message = f"{observation.get('name')} returned an error-shaped result"
             self._create_child_and_end(root, **observation, status_message=status_message)
 
@@ -1511,10 +1565,10 @@ class Filter:
         rag_chain = None
         rag_parent: Any = root
         if source_observations:
-            if root_type == self.valves.rag_root_type:
+            if root_type == self._root_type_rag:
                 for observation in source_observations:
                     self._create_child_and_end(root, **observation)
-            elif self.valves.group_rag_as_chain:
+            elif self._group_rag_as_chain:
                 user_msg = get_last_message_by_role(messages, "user")
                 user_query = (get_content_from_message(user_msg) or "")[:500]
                 try:
@@ -1528,7 +1582,7 @@ class Filter:
                             "rag_source_count": len(source_observations),
                             "observation_source": "function_rag_grouping",
                         },
-                        level=self.valves.default_level,
+                        level=self._level_default,
                     )
                     rag_parent = rag_chain
                 except Exception as e:
@@ -1563,7 +1617,7 @@ class Filter:
                 ),
                 output_data=clean_assistant_message if self.valves.capture_outputs else {"omitted": True},
                 metadata=generation_metadata,
-                level=self.valves.default_level,
+                level=self._level_default,
                 model_parameters=self._model_parameters(body),
                 usage_details=usage_details,
                 cost_details=cost_details,
@@ -1578,18 +1632,21 @@ class Filter:
 
         # Guardrail observation: per-category COUNTS of PII/secret redactions only
         # (never the matched strings), so it is itself safe to store.
-        if self.valves.enable_masking and self.valves.emit_guardrail_observation:
+        if self.valves.enable_masking and self._emit_guardrail_observation:
             user_msg = get_last_message_by_role(messages, "user")
-            scan_text = (get_content_from_message(user_msg) or "") + "\n" + (assistant_message or "")
+            # Scan the reconstructed assistant text (clean_assistant_message), not the raw
+            # `assistant_message`, because OWUI 0.10.x leaves `content` empty for persistent
+            # chats — scanning the raw value would miss PII in the assistant's response.
+            scan_text = (get_content_from_message(user_msg) or "") + "\n" + (clean_assistant_message or "")
             redaction_counts = self._count_redactions(scan_text)
             if redaction_counts:
                 categories_enabled = [
                     cat
                     for cat, active in [
                         ("data_uris", not self.valves.capture_multimodal),
-                        ("emails", self.valves.mask_emails),
-                        ("phone_numbers", self.valves.mask_phone_numbers),
-                        ("api_keys", self.valves.mask_api_keys),
+                        ("emails", self._mask_emails),
+                        ("phone_numbers", self._mask_phone_numbers),
+                        ("api_keys", self._mask_api_keys),
                     ]
                     if active
                 ]
@@ -1605,7 +1662,7 @@ class Filter:
                         **redaction_counts,
                         "total_redacted": sum(redaction_counts.values()),
                     },
-                    level=self.valves.guardrail_level,
+                    level=self._level_guardrail,
                     metadata={**trace_metadata, "observation_source": "function_masking"},
                 )
 
