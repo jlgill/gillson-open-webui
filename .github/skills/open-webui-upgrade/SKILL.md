@@ -27,6 +27,7 @@ Use this workflow when the user asks to:
 - If migration or startup checks fail, stop and offer rollback immediately.
 - Do not assume container names; detect or confirm them.
 - Never change compose image pins to a new tag until `docker manifest inspect` succeeds for that exact tag.
+- For an OWUI-only image upgrade, do not run `docker compose down` for the full stack. Pull and recreate only the OWUI service with `docker compose -f <composeFile> pull <webuiService>` followed by `docker compose -f <composeFile> up -d --no-deps <webuiService>`. This keeps LiteLLM and other dependencies available, which is essential when the active BYOK model routes through LiteLLM.
 
 ## Inputs
 Collect these once at the start and use defaults when omitted:
@@ -69,17 +70,17 @@ Collect these once at the start and use defaults when omitted:
 - Confirm `.github/workflows/docker-build.yaml` has completed successfully.
 - Confirm image manifest/digest is fresh.
 
-	For versioned upgrades (`vX.Y.Z`) on this repository, build/publish first:
-	- `git fetch upstream --tags`
-	- `git fetch origin --tags`
-	- `git tag -l vX.Y.Z` (or `git fetch upstream tag vX.Y.Z` if missing locally)
-	- `git ls-remote --tags origin vX.Y.Z`
-	- If missing in origin, publish tag to trigger workflow: `git push origin refs/tags/vX.Y.Z`
-	- Wait for `.github/workflows/docker-build.yaml` (triggered by `v*`) to complete successfully
-	- Verify image exists before compose pinning: `docker manifest inspect ghcr.io/jlgill/gillson-open-webui:vX.Y.Z`
-	- Only then change compose to the version tag and continue upgrade
+    For versioned upgrades (`vX.Y.Z`) on this repository, build/publish first:
+    - `git fetch upstream --tags`
+    - `git fetch origin --tags`
+    - `git tag -l vX.Y.Z` (or `git fetch upstream tag vX.Y.Z` if missing locally)
+    - `git ls-remote --tags origin vX.Y.Z`
+    - If missing in origin, publish tag to trigger workflow: `git push origin refs/tags/vX.Y.Z`
+    - Wait for `.github/workflows/docker-build.yaml` (triggered by `v*`) to complete successfully
+    - Verify image exists before compose pinning: `docker manifest inspect ghcr.io/jlgill/gillson-open-webui:vX.Y.Z`
+    - Only then change compose to the version tag and continue upgrade
 
-	If manifest inspect fails, do not pin compose to that tag.
+    If manifest inspect fails, do not pin compose to that tag.
 
 4. Backup Gate (required)
 - Create dated SQL dump with `pg_dump` from PostgreSQL container into the untracked `database-backups/` folder (create if missing; it is gitignored).
@@ -89,9 +90,9 @@ Collect these once at the start and use defaults when omitted:
 - Confirm compose image references the exact verified target tag (or `latest` if intentionally using rolling policy).
 
 6. Upgrade Runtime
-- `docker compose -f <composeFile> down`
-- `docker compose -f <composeFile> pull`
-- `docker compose -f <composeFile> up -d`
+- For an OWUI-only upgrade: `docker compose -f <composeFile> pull <webuiService>`.
+- Recreate only OWUI without restarting dependencies: `docker compose -f <composeFile> up -d --no-deps <webuiService>`.
+- Use full-stack `down` / `pull` / `up -d` only for a coordinated multi-service upgrade, after explicitly confirming the planned outage.
 
 7. Migration + Health Validation
 - Inspect OWUI logs for Alembic upgrade lines and absence of fatal errors.
@@ -136,9 +137,10 @@ Always report:
 ## Command Patterns
 Prefer matching these patterns to the user's OS and environment:
 - Backup: `docker exec -t <postgres-container> pg_dump -U <db-user> <db-name> > database-backups/<backup-file>`
-- Stop: `docker compose -f <compose-file> down`
-- Pull: `docker compose -f <compose-file> pull`
-- Start: `docker compose -f <compose-file> up -d`
+- OWUI-only pull: `docker compose -f <compose-file> pull <webui-service>`
+- OWUI-only start: `docker compose -f <compose-file> up -d --no-deps <webui-service>`
+- Coordinated-stack stop: `docker compose -f <compose-file> down` (only after explicit outage confirmation)
+- Coordinated-stack pull/start: `docker compose -f <compose-file> pull` then `docker compose -f <compose-file> up -d`
 - Logs: `docker compose -f <compose-file> logs <webui-service> --tail 100`
 - Health: `docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"`
 

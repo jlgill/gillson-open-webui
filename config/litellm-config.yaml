@@ -21,6 +21,9 @@ general_settings:
   database_url: os.environ/DATABASE_URL
   store_model_in_db: true
   # Spend tracking + virtual keys disabled for now; master key only.
+  # Buffer spend/usage writes in Redis and flush from a single pod-lock holder
+  # instead of every worker writing to Postgres on each request.
+  use_redis_transaction_buffer: true
 
 # =============================================================================
 # LiteLLM behavior — callbacks, telemetry
@@ -48,6 +51,28 @@ litellm_settings:
   success_callback: ["langfuse", "litellm_callbacks.owui_trace_correlator", "litellm_diagnostic.header_diagnostic_logger"]  # TEMP: +diagnostic
   failure_callback: ["otel"]
   service_callback: ["otel"]
+
+# =============================================================================
+# Router settings — shared state across the 2 uvicorn workers (--num_workers 2)
+# =============================================================================
+# Points at the SAME owui-redis instance Langfuse uses. Safe to share: LiteLLM
+# writes only `litellm*`-prefixed keys and `litellm_proxy.*` pub/sub channels,
+# Langfuse writes `bull:*` / `langfuse*` keys — no overlap on db 0.
+#
+# This block backs deployment cooldowns and usage/latency-based routing.
+# Cross-worker coordination (rate limits, budgets, spend buffer, pod lock,
+# config-change invalidation) is served by the coordination client, which
+# LiteLLM builds from the REDIS_HOST/REDIS_PORT/REDIS_PASSWORD env vars
+# supplied in docker-compose.prod.yaml.
+#
+# Response caching is deliberately NOT enabled (`litellm_settings.cache` is
+# absent): owui-redis runs maxmemory-policy noeviction for Langfuse's queues,
+# so cached completions could fill it and make Langfuse ingestion writes fail.
+# Reference: https://docs.litellm.ai/docs/proxy/redis_requirements
+router_settings:
+  redis_host: os.environ/REDIS_HOST
+  redis_port: os.environ/REDIS_PORT
+  redis_password: os.environ/REDIS_PASSWORD
 
 # OTEL exporter settings consumed by LiteLLM's otel integration
 # (also wired via OTEL_EXPORTER_OTLP_* env vars in compose)

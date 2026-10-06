@@ -167,6 +167,8 @@ services:
         condition: service_healthy
       grafana:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "2"]
     volumes:
       - ./config/litellm-config.yaml:/app/config.yaml:ro
@@ -180,6 +182,14 @@ services:
       - UI_PASSWORD=${UI_PASSWORD}
       - DATABASE_URL=postgresql://${DATABASE_USER:-postgres}:${DATABASE_PASSWORD}@postgres:5432/litellm
       - STORE_MODEL_IN_DB=true
+
+      # Redis — shared owui-redis instance (also used by Langfuse). Backs the
+      # coordination client: cross-worker rate limits, budgets, spend buffer,
+      # pod lock and config-change invalidation across --num_workers 2.
+      # router_settings in litellm-config.yaml reads these same vars.
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_AUTH}
 
       # Provider credentials (referenced from litellm-config.yaml via os.environ/*)
       - AZURE_API_KEY=${AZURE_API_KEY}
