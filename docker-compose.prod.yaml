@@ -452,7 +452,7 @@ services:
       - owui-network
 
   open-webui:
-    image: ghcr.io/jlgill/gillson-open-webui:v0.12.0
+    image: ghcr.io/jlgill/gillson-open-webui:v0.12.2
     container_name: owui-app
     depends_on:
       postgres:
