@@ -169,10 +169,9 @@ if (-not $SkipGhActionsCheck) {
 }
 Run-Or-Print "docker manifest inspect $ImageRef"
 
-Write-Step 'Upgrade runtime with Docker Compose'
-Run-Or-Print "docker compose -f $ComposeFile down"
-Run-Or-Print "docker compose -f $ComposeFile pull"
-Run-Or-Print "docker compose -f $ComposeFile up -d"
+Write-Step 'Upgrade Open WebUI without restarting dependencies'
+Run-Or-Print "docker compose -f $ComposeFile pull $WebUiService"
+Run-Or-Print "docker compose -f $ComposeFile up -d --no-deps $WebUiService"
 
 Write-Step 'Migration and health checks'
 $migrationLogs = Run-And-Capture "docker compose -f $ComposeFile logs $WebUiService --tail 200"

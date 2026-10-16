@@ -35,6 +35,67 @@ Open WebUI has a default timeout of 5 minutes for Ollama to finish generating th
 
 By following these enhanced troubleshooting steps, connection issues should be effectively resolved. For further assistance or queries, feel free to reach out to us on our community Discord.
 
+## Production Telemetry Retention
+
+The Grafana LGTM container stores several independent telemetry databases. The
+production policy is 14 days for telemetry only; it does not delete OWUI chats,
+PostgreSQL application data, or LiteLLM models, keys, and spend records.
+
+| Service | Retention Control | Cleanup |
+| --- | --- | --- |
+| Tempo | `config/lgtm/tempo.yaml`: `block_retention: 336h` | Expired blocks are marked, then physically deleted after the 1-hour compacted-block grace period. |
+| Prometheus | Compose `PROMETHEUS_EXTRA_ARGS`: `--storage.tsdb.retention.time=14d` | Deletes fully expired TSDB blocks; a block spanning the cutoff can remain. |
+| Loki | `config/lgtm/loki.yaml`: `retention_period: 336h` | Retention is enabled; chunk deletion follows a 2-hour safety delay. |
+| Pyroscope | `config/lgtm/pyroscope.yaml`: `limits.retention_period: 14d` | The v2 metastore index cleaner runs every 15 minutes with its default 6-hour grace period. |
+
+Retention is asynchronous, not a precise wall-clock file cutoff. These controls
+do not impose a maximum database size. LGTM Docker logs are separately rotated
+at 20 MB per file, with three files retained.
+
+Tempo uses five-minute, size-limited ingester blocks rather than the bundled
+one-second demo settings. Diagnostic logs are enabled for all four services.
+During a large backlog recovery, CPU and memory can remain elevated. Use a narrow
+time range for trace queries until the backlog is reduced.
+
+### Verify Cleanup, Not Just Configuration
+
+```powershell
+docker logs --since 30m owui-grafana 2>&1 | Select-String 'failed to poll|blocklist poll complete|marking block for deletion|deleting block|index cleaner|retention'
+docker exec owui-grafana sh -c 'curl -fsS http://localhost:3200/metrics | grep -E "^(tempodb_blocklist_tenant_index_errors_total|tempodb_retention_(marked_for_deletion_total|deleted_total|errors_total)|tempodb_compaction_errors_total)"'
+docker exec owui-grafana sh -c 'curl -fsS http://localhost:9090/metrics | grep -E "^prometheus_tsdb_(time_retentions_total|retention_limit_seconds)"'
+docker exec owui-grafana sh -c 'curl -fsS http://localhost:3100/metrics | grep -E "^loki_.*(retention|sweeper).*(_total|timestamp_seconds)"'
+docker exec owui-grafana sh -c 'du -sh /data/tempo /data/prometheus /data/loki /data/pyroscope'
+```
+
+Counters reset on restart. A configured duration is not proof of deletion:
+verify successful cleanup cycles, increasing deletion counters when expired data
+exists, falling disk usage, and successful queries for recent telemetry.
+
+### Corrupt Tempo Metadata
+
+On 2026-10-09, seven zero-length metadata files existed in both backend blocks
+and the local completed-block cache. A single malformed block caused the tenant
+index build to fail, leaving compaction and retention with no indexed blocks.
+
+`scripts/repair-tempo-metadata.py` defaults to read-only scanning. Its `--apply`
+mode moves malformed block directories into `/data/tempo/quarantine/<timestamp>`
+and writes a manifest. Adding `--prune-expired` explicitly authorizes deletion of
+validated blocks whose end time is more than 14 days old, including compacted
+blocks; deleted block IDs and end times are recorded in `expired-blocks.jsonl`.
+Recent blocks are preserved. Without `--apply`, both operations are read-only.
+Run apply only with LGTM stopped, using a maintenance container mounting the `grafana-data`
+volume. Do not run it against live writers, wipe the shared volume, or restore
+malformed metadata into the active block directory. Quarantined files are kept
+outside the active store and are not automatically pruned by Tempo retention.
+
+The one-time recovery quarantined 14 corrupt copies and purged 897,068 expired
+block directories. Trace storage fell from 148 GB to 20 GB, and the first healthy
+index rebuild after purging took about nine seconds. Prometheus also deleted an
+expired metrics block after its retention setting changed from 15 to 14 days.
+Loki's delayed chunk deletion and Pyroscope's first scheduled index-cleaner pass
+must be checked after their respective grace periods; startup/configuration alone
+does not prove that these services physically deleted expired data.
+
 ## Production PostgreSQL Observability
 
 The production stack exposes PostgreSQL metrics through `owui-postgres-exporter` on `127.0.0.1:9187` and scrapes them into the bundled Grafana LGTM Prometheus instance. This catches database saturation before Open WebUI or LiteLLM fail with `FATAL: sorry, too many clients already`.
