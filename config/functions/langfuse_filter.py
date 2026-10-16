@@ -2,7 +2,7 @@
 title: Langfuse Filter
 author: gillson (derived from open-webui Langfuse pipeline v4)
 author_url: https://github.com/jlgill
-version: 1.1.0
+version: 1.2.0
 license: MIT
 required_open_webui_version: 0.10.0
 requirements: langfuse==3.15.0
@@ -60,7 +60,7 @@ _OWUI_DETAILS_RE = re.compile(r"<details\b[^>]*>.*?</details>", re.DOTALL | re.I
 
 # Trace identity — tracks the code version; do NOT expose as a valve or it
 # will drift from the actual code.
-_TRACE_VERSION = "open-webui-langfuse-function-v1.1"
+_TRACE_VERSION = "open-webui-langfuse-function-v1.2"
 
 # Langfuse observation levels. Map to DEBUG/DEFAULT/WARNING/ERROR.
 _LEVEL_DEFAULT = "DEFAULT"
@@ -253,6 +253,9 @@ class Filter:
         self._start_ts: Dict[str, float] = {}
         # trace_id -> {first,last,chunks,chars} accumulated during stream().
         self._stream: Dict[str, dict] = {}
+        # trace_id -> per-turn counter for stream_call_N span naming (agentic
+        # turns stream once per LLM call; indexing keeps the spans distinguishable).
+        self._stream_seq: Dict[str, int] = {}
         self.suppressed_logs: set[str] = set()
         # Throttled lazy re-init so tracing self-heals after a startup race without a restart.
         self._last_init_attempt = 0.0
@@ -396,12 +399,35 @@ class Filter:
         return self._root_type_chat
 
     # ----------------------------------------------------------------- masking
-    def _mask_keys(self) -> set[str]:
-        return {key.strip().lower() for key in self.valves.mask_metadata_keys.split(",") if key.strip()}
+    def _mask_key_segments(self) -> set[frozenset[str]]:
+        """Configured mask keys normalized to segment sets, cached per valve value.
+
+        "api_key" -> {api, key}; "set-cookie" -> {set, cookie}.
+        """
+        raw = self.valves.mask_metadata_keys
+        if getattr(self, "_mask_segments_src", None) != raw:
+            self._mask_segments_src = raw
+            self._mask_segments_cache = {
+                frozenset(seg for seg in re.split(r"[^a-z0-9]+", entry.strip().lower()) if seg)
+                for entry in raw.split(",")
+                if entry.strip()
+            }
+        return self._mask_segments_cache
 
     def _should_mask_key(self, key: str) -> bool:
-        lowered = key.lower()
-        return any(mask_key in lowered for mask_key in self._mask_keys())
+        """Segment-superset matching, NOT substring matching.
+
+        The old substring check redacted innocent keys: "token" matched inside
+        "est_output_tokens"/"prompt_tokens" (stream spans + usage metadata came
+        out as "[REDACTED]"), "key" inside "monkey". A key is masked only when
+        its alphanumeric segments contain ALL segments of a configured mask key
+        ("access_token" -> {access, token} contains {token} -> masked;
+        "est_output_tokens" -> {est, output, tokens} -> not masked).
+        """
+        segments = {seg for seg in re.split(r"[^a-z0-9]+", key.strip().lower()) if seg}
+        if not segments:
+            return False
+        return any(mask_seg and mask_seg.issubset(segments) for mask_seg in self._mask_key_segments())
 
     def _count_redactions(self, text: str) -> Dict[str, int]:
         if not isinstance(text, str) or not text:
@@ -559,7 +585,7 @@ class Filter:
             return None
 
     def _gc_dicts(self):
-        for d in (self._start_ts, self._stream):
+        for d in (self._start_ts, self._stream, self._stream_seq):
             if len(d) > 2000:
                 for key in list(d.keys())[: len(d) - 1000]:
                     d.pop(key, None)
@@ -960,9 +986,9 @@ class Filter:
         ]
         return {key: body[key] for key in parameter_keys if key in body and body[key] is not None}
 
-    def _extract_usage_details(self, usage: Optional[dict]) -> Tuple[Optional[dict], Optional[dict]]:
+    def _extract_usage_details(self, usage: Optional[dict]) -> Tuple[Optional[dict], Optional[dict], bool]:
         if not isinstance(usage, dict) or not usage:
-            return None, None
+            return None, None, False
 
         input_tokens = first_present(
             usage,
@@ -988,6 +1014,18 @@ class Filter:
 
         if "total" not in usage_details and ("input" in usage_details or "output" in usage_details):
             usage_details["total"] = usage_details.get("input", 0) + usage_details.get("output", 0)
+
+        # OWUI's aggregated usage for multi-call (agentic) turns is unreliable —
+        # observed input=205836/output=4354/total=75241 on a 6-call turn where
+        # the per-call sums were 73478/1763. When total != input + output,
+        # recompute it and flag the generation metadata so the discrepancy is
+        # visible (accurate per-call numbers live on litellm_generation obs).
+        usage_total_reconciled = False
+        if "input" in usage_details and "output" in usage_details and "total" in usage_details:
+            expected_total = usage_details["input"] + usage_details["output"]
+            if usage_details["total"] != expected_total:
+                usage_details["total"] = expected_total
+                usage_total_reconciled = True
 
         for details_key, prefix in [
             ("prompt_tokens_details", "input"),
@@ -1017,7 +1055,7 @@ class Filter:
             except (TypeError, ValueError):
                 pass
 
-        return usage_details or None, cost_details or None
+        return usage_details or None, cost_details or None, usage_total_reconciled
 
     def _extract_output_text(self, output_parts: Any) -> str:
         if isinstance(output_parts, str):
@@ -1302,7 +1340,14 @@ class Filter:
         divisor = self._stream_chars_per_token or 4.0
         est_tokens = int(chars / divisor) if divisor else None
 
+        # Agentic turns stream once per LLM call. Index the spans so each call's
+        # metrics are distinguishable in the trace tree (stream_call_1, _2, ...).
+        seq = self._stream_seq.get(trace_id, 0) + 1
+        self._stream_seq[trace_id] = seq
+        span_name = "stream" if seq == 1 else f"stream_call_{seq}"
+
         output: Dict[str, Any] = {
+            "stream_call_index": seq,
             "ttft_seconds": round(ttft, 4) if ttft is not None else None,
             "stream_duration_seconds": round(duration, 4),
             "chunks": int(state.get("chunks", 0)),
@@ -1315,9 +1360,9 @@ class Filter:
         self._create_on_trace_and_end(
             trace_id,
             as_type="span",
-            name="stream",
+            name=span_name,
             output_data=output,
-            metadata={"observation_source": "function_stream"},
+            metadata={"observation_source": "function_stream", "stream_call_index": seq},
             level=self._level_default,
         )
 
@@ -1472,7 +1517,7 @@ class Filter:
             ]
             clean_assistant_message = "\n".join(p for p in text_parts if p) or None
         usage_raw = assistant_message_obj.get("usage") if assistant_message_obj else None
-        usage_details, cost_details = self._extract_usage_details(usage_raw)
+        usage_details, cost_details, usage_total_reconciled = self._extract_usage_details(usage_raw)
 
         # Task: explicit metadata first, then infer from response shape (background tasks).
         task_name = explicit_task or self._infer_task_name_from_assistant_message(assistant_message) or "llm_response"
@@ -1602,6 +1647,7 @@ class Filter:
             "tool_call_count": len(tool_names),
             "tool_names": tool_names,
             "usage_raw": usage_raw,
+            "usage_total_reconciled": usage_total_reconciled,
         }
 
         try:
@@ -1678,6 +1724,8 @@ class Filter:
                 self._emit_stream_span(trace_id, leftover)
             except Exception:
                 pass
+        # Turn complete — clear the per-turn stream counter.
+        self._stream_seq.pop(trace_id, None)
 
         if self.valves.flush_on_outlet:
             try:
