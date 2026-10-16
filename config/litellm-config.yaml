@@ -49,7 +49,9 @@ litellm_settings:
   # Points at the LiteLLM proxy Langfuse project (LANGFUSE_LITE_LLM_* keys in .env).
   # Traces ALL traffic (OWUI + VS Code + any other client) with cost + token data.
   success_callback: ["langfuse", "litellm_callbacks.owui_trace_correlator", "litellm_diagnostic.header_diagnostic_logger"]  # TEMP: +diagnostic
-  failure_callback: ["otel"]
+  # Correlator also on failure_callback: failed LLM calls emit ERROR-level
+  # litellm_generation observations on the OWUI trace instead of vanishing.
+  failure_callback: ["otel", "litellm_callbacks.owui_trace_correlator"]
   service_callback: ["otel"]
 
 # =============================================================================
