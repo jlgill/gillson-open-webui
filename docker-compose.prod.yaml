@@ -44,7 +44,7 @@ services:
       - owui-network
 
   ollama:
-    image: ollama/ollama:${OLLAMA_DOCKER_TAG:-0.34.0}
+    image: ollama/ollama:${OLLAMA_DOCKER_TAG:-0.40.5}
     container_name: owui-ollama
     volumes:
       - ollama:/root/.ollama
@@ -328,7 +328,7 @@ services:
       - owui-network
 
   minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    image: minio/minio:RELEASE.2025-10-15T17-29-55Z
     container_name: owui-minio
     restart: unless-stopped
     command: server --address ":9000" --console-address ":9001" /data
@@ -544,7 +544,7 @@ services:
       - outline-net
 
   open-terminal:
-    image: ghcr.io/open-webui/open-terminal:0.12.5
+    image: ghcr.io/open-webui/open-terminal:0.14.0
     container_name: owui-terminal
     restart: unless-stopped
     environment:
