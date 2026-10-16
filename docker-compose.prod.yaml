@@ -101,10 +101,43 @@ services:
     image: grafana/otel-lgtm:0.28.0
     container_name: owui-grafana
     restart: unless-stopped
+    entrypoint: ["/bin/sh", "/app/grafana-prod-entrypoint.sh"]
+    command: ["/otel-lgtm/run-all.sh"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     environment:
+      - ENABLE_LOGS_TEMPO=true
+      - ENABLE_LOGS_LOKI=true
+      - ENABLE_LOGS_PYROSCOPE=true
+      - ENABLE_LOGS_PROMETHEUS=true
+      - PROMETHEUS_EXTRA_ARGS=--storage.tsdb.retention.time=14d
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_SERVER_HTTP_ADDR=0.0.0.0
+      - GF_SERVER_HTTP_PORT=3000
+      - GF_SERVER_ROOT_URL=https://grafana.gillson.us/
+      - GF_SECURITY_COOKIE_SECURE=true
+      - GF_SECURITY_COOKIE_SAMESITE=lax
+      - GF_AUTH_OAUTH_AUTO_LOGIN=false
       - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_AUTH_AZUREAD_NAME=Microsoft Entra ID
+      - GF_AUTH_AZUREAD_ENABLED=true
+      - GF_AUTH_AZUREAD_ALLOW_SIGN_UP=true
+      - GF_AUTH_AZUREAD_AUTO_LOGIN=false
+      - GF_AUTH_AZUREAD_CLIENT_AUTHENTICATION=client_secret_post
+      - GF_AUTH_AZUREAD_CLIENT_ID=020c3e3a-e52c-476a-90f9-45413fbe3276
+      - GF_AUTH_AZUREAD_SCOPES=openid email profile
+      - GF_AUTH_AZUREAD_AUTH_URL=https://login.microsoftonline.com/1b4ec955-c987-44c3-a62f-d1cd054d1ddc/oauth2/v2.0/authorize
+      - GF_AUTH_AZUREAD_TOKEN_URL=https://login.microsoftonline.com/1b4ec955-c987-44c3-a62f-d1cd054d1ddc/oauth2/v2.0/token
+      - GF_AUTH_AZUREAD_ALLOWED_ORGANIZATIONS=1b4ec955-c987-44c3-a62f-d1cd054d1ddc
+      - GF_AUTH_AZUREAD_ROLE_ATTRIBUTE_STRICT=true
+      - GF_AUTH_AZUREAD_ALLOW_ASSIGN_GRAFANA_ADMIN=true
+      - GF_AUTH_AZUREAD_SKIP_ORG_ROLE_SYNC=false
+      - GF_AUTH_AZUREAD_FORCE_USE_GRAPH_API=false
+      - GF_AUTH_AZUREAD_USE_PKCE=true
     ports:
       - "127.0.0.1:3000:3000"   # Grafana UI (localhost only)
       # Ports 4317 (OTLP/gRPC) and 4318 (OTLP/HTTP) are internal — no external exposure needed
@@ -123,6 +156,12 @@ services:
       - grafana-data:/data
       # Extends the bundled LGTM Prometheus config with infrastructure scrapes.
       - ./config/lgtm/prometheus.yaml:/otel-lgtm/prometheus.yaml:ro
+      - ./config/lgtm/tempo.yaml:/otel-lgtm/tempo-config.yaml:ro
+      - ./config/lgtm/loki.yaml:/otel-lgtm/loki-config.yaml:ro
+      - ./config/lgtm/pyroscope.yaml:/otel-lgtm/pyroscope-config.yaml:ro
+      - ./scripts/grafana-prod-entrypoint.sh:/app/grafana-prod-entrypoint.sh:ro
+    secrets:
+      - grafana_oauth_client_secret
     networks:
       - owui-network
 
@@ -169,17 +208,24 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    entrypoint: ["/bin/sh", "/app/litellm-oauth-entrypoint.sh"]
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "2"]
     volumes:
       - ./config/litellm-config.yaml:/app/config.yaml:ro
       - ./config/litellm-callbacks.py:/app/litellm_callbacks.py:ro
       - ./config/litellm-diagnostic.py:/app/litellm_diagnostic.py:ro  # TEMP: header discovery
+      - ./scripts/litellm-prod-entrypoint.sh:/app/litellm-oauth-entrypoint.sh:ro
+    secrets:
+      - litellm_oauth_client_secret
     environment:
       # Core
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - LITELLM_SALT_KEY=${LITELLM_SALT_KEY}
       - UI_USERNAME=${UI_USERNAME}
       - UI_PASSWORD=${UI_PASSWORD}
+      - MICROSOFT_CLIENT_ID=abb637de-25d6-45d0-ae32-1da3682480c2
+      - MICROSOFT_TENANT=1b4ec955-c987-44c3-a62f-d1cd054d1ddc
+      - PROXY_BASE_URL=https://litellm.gillson.us
       - DATABASE_URL=postgresql://${DATABASE_USER:-postgres}:${DATABASE_PASSWORD}@postgres:5432/litellm
       - STORE_MODEL_IN_DB=true
 
@@ -360,6 +406,16 @@ services:
     image: langfuse/langfuse:3.225.7
     container_name: owui-langfuse
     restart: unless-stopped
+    entrypoint: ["dumb-init", "--", "/bin/sh", "/app/langfuse-prod-entrypoint.sh"]
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        if [ -n "$$NEXT_PUBLIC_LANGFUSE_CLOUD_REGION" ]; then
+          node --import dd-trace/initialize.mjs ./web/server.js --keepAliveTimeout 110000;
+        else
+          node ./web/server.js --keepAliveTimeout 110000;
+        fi
     depends_on:
       langfuse-worker:
         condition: service_started
@@ -368,8 +424,17 @@ services:
       HOSTNAME: 0.0.0.0     # bind Next.js to all interfaces (default binds to eth0 IP only; breaks 127.0.0.1 healthcheck)
       NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3030}
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      AUTH_AZURE_AD_CLIENT_ID: 5f1c6a02-e5d3-499b-8d8c-a93a3ef94b1c
+      AUTH_AZURE_AD_TENANT_ID: 1b4ec955-c987-44c3-a62f-d1cd054d1ddc
+      AUTH_AZURE_AD_ALLOW_ACCOUNT_LINKING: "true"
+      NODE_OPTIONS: --require=/app/langfuse-prod-ipv4.cjs
       LANGFUSE_INIT_ORG_ID: gillson
       LANGFUSE_INIT_ORG_NAME: Gillson
+    volumes:
+      - ./scripts/langfuse-prod-entrypoint.sh:/app/langfuse-prod-entrypoint.sh:ro
+      - ./scripts/oauth-pilot/node-ipv4.cjs:/app/langfuse-prod-ipv4.cjs:ro
+    secrets:
+      - langfuse_oauth_client_secret
     ports:
       - "127.0.0.1:3030:3000"   # Langfuse UI (localhost only; expose via Cloudflare in Phase 4)
     healthcheck:
@@ -387,7 +452,7 @@ services:
       - owui-network
 
   open-webui:
-    image: ghcr.io/jlgill/gillson-open-webui:v0.11.4-gillson
+    image: ghcr.io/jlgill/gillson-open-webui:v0.12.0
     container_name: owui-app
     depends_on:
       postgres:
@@ -659,6 +724,13 @@ secrets:
     file: ./secrets/open_terminal_api_key.txt
   mcpo_api_key:
     file: ./secrets/mcpo_api_key.txt
+  litellm_oauth_client_secret:
+    file: ./secrets/litellm_oauth_client_secret.txt
+  grafana_oauth_client_secret:
+    file: ./secrets/grafana_oauth_client_secret.txt
+  langfuse_oauth_client_secret:
+    file: ./secrets/langfuse_oauth_client_secret.txt
+
 
 volumes:
   postgres-data:
