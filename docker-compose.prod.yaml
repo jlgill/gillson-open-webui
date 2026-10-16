@@ -98,7 +98,7 @@ services:
       - owui-network
 
   grafana:
-    image: grafana/otel-lgtm:0.28.0
+    image: grafana/otel-lgtm:0.36.0
     container_name: owui-grafana
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/app/grafana-prod-entrypoint.sh"]
@@ -281,7 +281,7 @@ services:
   # Docs: https://langfuse.com/self-hosting/docker-compose
   # ===========================================================================
   clickhouse:
-    image: clickhouse/clickhouse-server:24.8.14.39
+    image: clickhouse/clickhouse-server:25.12.11.4
     container_name: owui-clickhouse
     restart: unless-stopped
     environment:
@@ -328,7 +328,14 @@ services:
       - owui-network
 
   minio:
-    image: minio/minio:RELEASE.2025-10-15T17-29-55Z
+    # NOTE: MinIO archived its GitHub repo (Apr 2026) and removed all pre-built
+    # Docker images from Docker Hub. This tag is only available via local cache.
+    # CVE RELEASE.2025-10-15T17-29-55Z (GHSA-jjjj-jwhf-8rgr, privilege escalation)
+    # exists but has no published image — would need building from source.
+    # TODO: Review whether MinIO is needed at all — Langfuse uses it for S3
+    # event/media storage, but we don't use S3-compatible storage for OWUI.
+    # Evaluate during Langfuse v4 upgrade whether MinIO can be dropped entirely.
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: owui-minio
     restart: unless-stopped
     command: server --address ":9000" --console-address ":9001" /data
@@ -354,7 +361,7 @@ services:
       - owui-network
 
   langfuse-worker:
-    image: langfuse/langfuse-worker:3.225.7
+    image: langfuse/langfuse-worker:3.225.11
     container_name: owui-langfuse-worker
     restart: unless-stopped
     depends_on:
@@ -403,7 +410,7 @@ services:
       - owui-network
 
   langfuse-web:
-    image: langfuse/langfuse:3.225.7
+    image: langfuse/langfuse:3.225.11
     container_name: owui-langfuse
     restart: unless-stopped
     entrypoint: ["dumb-init", "--", "/bin/sh", "/app/langfuse-prod-entrypoint.sh"]
