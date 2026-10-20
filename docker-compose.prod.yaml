@@ -213,7 +213,6 @@ services:
     volumes:
       - ./config/litellm-config.yaml:/app/config.yaml:ro
       - ./config/litellm-callbacks.py:/app/litellm_callbacks.py:ro
-      - ./config/litellm-diagnostic.py:/app/litellm_diagnostic.py:ro  # TEMP: header discovery
       - ./scripts/litellm-prod-entrypoint.sh:/app/litellm-oauth-entrypoint.sh:ro
     secrets:
       - litellm_oauth_client_secret
@@ -251,14 +250,21 @@ services:
       - OTEL_SERVICE_NAME=litellm
       - OTEL_TRACES_EXPORTER=otlp
 
-      # Langfuse — two projects, two key sets:
-      #   LANGFUSE_PUBLIC/SECRET_KEY  → LiteLLM proxy project (native callback, all traffic)
-      #   OWUI_LANGFUSE_PUBLIC/SECRET_KEY → OWUI chat project (OWUITraceCorrelator, cost enrichment)
+      # Langfuse — OWUI chat project used by the correlator.
       - LANGFUSE_HOST=http://langfuse-web:3000
-      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_LITE_LLM_PROJECT_KEY:-}
-      - LANGFUSE_SECRET_KEY=${LANGFUSE_LITE_LLM_SECRET_KEY:-}
       - OWUI_LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
       - OWUI_LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+
+      # Langfuse tracing pilot (shared contract with the OWUI filter function).
+      #   OCCUMED_TRACING_ENABLED          — master switch (double opt-in with the filter valve)
+      #   OCCUMED_TRACING_PILOT_USER_IDS   — comma-separated OWUI user IDs allowed to trace
+      #   OCCUMED_TRACING_CAPTURE_CONTENT  — true = prompts/outputs/tool args flow to Langfuse
+      #                                         (masked); false = metrics/usage/cost only
+      #   OWUI_TRACE_CORRELATOR_DEBUG      — verbose correlator logging (off in normal ops)
+      - OCCUMED_TRACING_ENABLED=${OCCUMED_TRACING_ENABLED:-false}
+      - OCCUMED_TRACING_PILOT_USER_IDS=${OCCUMED_TRACING_PILOT_USER_IDS:-}
+      - OCCUMED_TRACING_CAPTURE_CONTENT=${OCCUMED_TRACING_CAPTURE_CONTENT:-false}
+      - OWUI_TRACE_CORRELATOR_DEBUG=${OWUI_TRACE_CORRELATOR_DEBUG:-false}
     ports:
       - "127.0.0.1:4000:4000"   # localhost only; internal services use http://litellm:4000
     healthcheck:
@@ -515,6 +521,16 @@ services:
       # (Langfuse session/user attribution now comes from the OWUI request body
       # metadata via the Langfuse filter pipeline, not these headers.)
       - ENABLE_FORWARD_USER_INFO_HEADERS=true
+
+      # Langfuse tracing pilot (shared contract with the LiteLLM correlator;
+      # see the litellm service block for semantics). The filter function also
+      # has its own `enabled` valve — tracing requires BOTH this env var and
+      # the valve. NOTE: importing the v1.3.0 filter auto-installs langfuse
+      # 4.15.6 container-wide (frontmatter requirements); deactivate the old
+      # langfuse_filter function BEFORE importing the new one.
+      - OCCUMED_TRACING_ENABLED=${OCCUMED_TRACING_ENABLED:-false}
+      - OCCUMED_TRACING_PILOT_USER_IDS=${OCCUMED_TRACING_PILOT_USER_IDS:-}
+      - OCCUMED_TRACING_CAPTURE_CONTENT=${OCCUMED_TRACING_CAPTURE_CONTENT:-false}
       
       # Telemetry off
       - SCARF_NO_ANALYTICS=true
