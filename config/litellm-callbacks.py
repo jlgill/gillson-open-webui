@@ -12,31 +12,48 @@ deterministic trace ID using:
 
     trace_id = sha256(f"{chat_id}:{message_id}".encode()).digest()[:16].hex()
 
-This mirrors Langfuse.create_trace_id(seed=...) — confirmed from langfuse==3.15.0.
+This mirrors Langfuse.create_trace_id(seed=...) — confirmed from langfuse==4.15.6.
 This callback recomputes the same ID from OWUI's forwarded request headers and
 attaches a Langfuse "generation" observation with LiteLLM's accurate cost + usage
 PLUS the per-call input messages, completion output, tool calls, reasoning,
 gateway TTFT (completion_start_time), and model parameters.
 
-NOTE: The LiteLLM container ships langfuse v2 (2.57.x), not v3. This callback
+NOTE: The LiteLLM container ships langfuse v2 (2.59.7), not v4. This callback
 uses the langfuse v2 SDK API: lf.generation(trace_id=..., usage={...}).
 The langfuse v2 Usage dict supports total_cost for passing LiteLLM's cost data.
+
+v1.3.0 (issue #1 hardening):
+- No per-request flush(); SDK background batching with bounded queues (1024),
+  short timeouts, and an atexit shutdown flush (LiteLLM's proxy shutdown hook
+  only flushes its NATIVE langfuse logger, not custom loggers).
+- Content capture gated by OCCUMED_TRACING_CAPTURE_CONTENT (same contract as the
+  OWUI filter); usage/cost/TTFT/metadata always flow.
+- Pilot gating via OCCUMED_TRACING_ENABLED + OCCUMED_TRACING_PILOT_USER_IDS,
+  matching the filter's _eligible().
+- 1MB per-record cap with progressive degradation (input dropped, then output)
+  before dropping the record; drop counter surfaced via throttled detail-free log.
+- Failure events emit ERROR-level generations with generic status text when
+  capture is off (error detail is content).
 
 Setup checklist
 ---------------
 1. docker-compose.prod.yaml — mount this file into owui-litellm:
        ./config/litellm-callbacks.py:/app/litellm_callbacks.py:ro
 
-2. litellm-config.yaml — register under success_callback:
-       success_callback: ["langfuse", "litellm_callbacks.owui_trace_correlator"]
+2. litellm-config.yaml — register under success_callback AND failure_callback:
+       success_callback: ["litellm_callbacks.owui_trace_correlator"]
+       failure_callback: ["litellm_callbacks.owui_trace_correlator"]
 
 3. OWUI Admin → Connections → (LiteLLM entry) → Headers — add:
        {"X-OpenWebUI-Message-Id": "{{MESSAGE_ID}}"}
-   (X-OpenWebUI-Chat-Id is already forwarded automatically by
-    ENABLE_FORWARD_USER_INFO_HEADERS=true in docker-compose.prod.yaml.)
+   (X-OpenWebUI-Chat-Id and X-OpenWebUI-User-Id are auto-forwarded by
+    ENABLE_FORWARD_USER_INFO_HEADERS=true in docker-compose.prod.yaml.
+    NOTE: if FORWARD_USER_INFO_HEADER_JWT_SECRET is ever set, OWUI sends a
+    single JWT header instead of X-OpenWebUI-User-Id and this correlator
+    goes blind — keep that env var unset while using header-based gating.)
 
 4. LANGFUSE_HOST / OWUI_LANGFUSE_PUBLIC_KEY / OWUI_LANGFUSE_SECRET_KEY must be set
-   in the litellm container environment (already present in docker-compose.prod.yaml).
+    in the litellm container environment (already present in docker-compose.prod.yaml).
 
 Result in Langfuse
 ------------------
@@ -49,26 +66,45 @@ They share the same trace_id so they appear together under one trace.
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import logging
 import os
 import re
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from litellm.integrations.custom_logger import CustomLogger
 
 log = logging.getLogger("owui_trace_correlator")
-log.setLevel(logging.DEBUG)
+log.setLevel(logging.WARNING)
+
+# Per-record export cap; oversized records degrade progressively before dropping.
+_MAX_RECORD_BYTES = 1_048_576
+
+
+def _enabled(name: str) -> bool:
+    return os.getenv(name, "false").lower() == "true"
+
+
+def _debug() -> bool:
+    return os.getenv("OWUI_TRACE_CORRELATOR_DEBUG", "false").lower() == "true"
+
+
+def _pilot(user_id: Optional[str]) -> bool:
+    allowed = {value.strip() for value in os.getenv("OCCUMED_TRACING_PILOT_USER_IDS", "").split(",") if value.strip()}
+    return _enabled("OCCUMED_TRACING_ENABLED") and bool(user_id and user_id in allowed)
 
 
 # ── trace-ID formula ──────────────────────────────────────────────────────────
 
 def _trace_id(chat_id: str, message_id: Optional[str]) -> str:
-    """Reproduces Langfuse.create_trace_id(seed=…) from langfuse==3.15.0.
+    """Reproduces Langfuse.create_trace_id(seed=…) from langfuse==4.15.6.
 
-    Source (confirmed in running owui-app container):
+    Source (confirmed in the pinned Open WebUI SDK):
         return sha256(seed.encode("utf-8")).digest()[:16].hex()
 
     Seed mirrors langfuse_filter.py → Filter._trace_id_for():
@@ -310,21 +346,43 @@ class OWUITraceCorrelator(CustomLogger):
     that the OWUI Langfuse filter function seeded via inlet/outlet.
 
     Uses the langfuse v2 SDK API (lf.generation) since the LiteLLM container
-    ships langfuse v2, not v3.
+    ships langfuse v2, not v4.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self._lf = None
-        self._init_langfuse()
+        self._last_init = float("-inf")
+        self.failures = 0
+        self.dropped = 0
+        self._last_log = float("-inf")
+        atexit.register(self._shutdown_flush)
+
+    def _throttled_log(self, message: str) -> None:
+        """Detail-free, throttled (60s) degradation notice; full detail only when
+        OWUI_TRACE_CORRELATOR_DEBUG=true (container logs must stay content-free)."""
+        if _debug():
+            log.warning("OWUITraceCorrelator: %s", message)
+            return
+        if time.monotonic() - self._last_log >= 60:
+            self._last_log = time.monotonic()
+            log.warning("OWUITraceCorrelator: telemetry degraded; details suppressed")
+
+    def _shutdown_flush(self) -> None:
+        """Bounded final flush at process exit (LiteLLM never calls a shutdown hook
+        on custom loggers; without this, up to flush_interval of buffered events
+        would be lost on every restart)."""
+        if self._lf is None:
+            return
+        flush_thread = threading.Thread(target=self._lf.flush, daemon=True)
+        flush_thread.start()
+        flush_thread.join(timeout=5)
 
     def _init_langfuse(self) -> None:
-        # Use OWUI-project-specific keys so this correlator always posts cost observations
-        # into the OWUI Langfuse project, even when the native 'langfuse' callback is
-        # configured with different (proxy-project) keys via LANGFUSE_PUBLIC/SECRET_KEY.
+        # Use OWUI-project-specific keys for correlated chat observations.
         host = os.getenv("LANGFUSE_HOST")
-        pub = os.getenv("OWUI_LANGFUSE_PUBLIC_KEY")
-        sec = os.getenv("OWUI_LANGFUSE_SECRET_KEY")
+        pub = os.getenv("OWUI_LANGFUSE_PUBLIC_KEY") or os.getenv("LANGFUSE_PUBLIC_KEY")
+        sec = os.getenv("OWUI_LANGFUSE_SECRET_KEY") or os.getenv("LANGFUSE_SECRET_KEY")
         if not (host and pub and sec):
             log.warning(
                 "OWUITraceCorrelator: LANGFUSE_HOST/OWUI_LANGFUSE_PUBLIC_KEY/OWUI_LANGFUSE_SECRET_KEY not set — disabled"
@@ -334,12 +392,17 @@ class OWUITraceCorrelator(CustomLogger):
             from langfuse import Langfuse  # noqa: PLC0415
 
             # langfuse v2 constructor — no tracer_provider; v2 uses HTTP API, not OTEL.
-            self._lf = Langfuse(host=host, public_key=pub, secret_key=sec)
-            log.info(
-                "OWUITraceCorrelator: Langfuse v2 client initialized (host=%s)", host
-            )
+            client = Langfuse(host=host, public_key=pub, secret_key=sec,
+                              timeout=2, max_retries=2, threads=1,
+                              flush_at=32, flush_interval=1, debug=False)
+            for queue in (client.task_manager._ingestion_queue,
+                          client.task_manager._media_upload_queue):
+                with queue.mutex:
+                    queue.maxsize = 1024
+            self._lf = client
         except Exception as exc:
-            log.error("OWUITraceCorrelator: Langfuse init failed — %s", exc)
+            self.failures += 1
+            self._throttled_log(f"initialization failed: {exc}")
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -397,18 +460,25 @@ class OWUITraceCorrelator(CustomLogger):
         status_message: Optional[str] = None,
     ) -> None:
         """Build and post the litellm_generation observation (success or failure)."""
-        if not self._lf:
-            return
         try:
             hdrs = self._proxy_headers(kwargs)
             chat_id = self._header(hdrs, "X-OpenWebUI-Chat-Id")
             message_id = self._header(hdrs, "X-OpenWebUI-Message-Id")
+            user_id = self._header(hdrs, "X-OpenWebUI-User-Id")
 
             # Skip non-OWUI calls and temporary ("local") sessions.
-            if not chat_id or chat_id == "local":
+            if not _pilot(user_id) or not chat_id or chat_id == "local" or not message_id:
+                return
+            if any("{{" in value or len(value) > 200 for value in (chat_id, message_id, user_id)):
+                return
+            if self._lf is None and time.monotonic() - self._last_init >= 30:
+                self._last_init = time.monotonic()
+                self._init_langfuse()
+            if self._lf is None:
                 return
 
             trace_id = _trace_id(chat_id, message_id)
+            capture = _enabled("OCCUMED_TRACING_CAPTURE_CONTENT")
 
             # ── usage dict (langfuse v2 accepts plain dict) ────────────────
             usage: dict[str, Any] = {}
@@ -424,16 +494,14 @@ class OWUITraceCorrelator(CustomLogger):
                     or getattr(u, "output_tokens", None)
                     or 0
                 )
-                total_t = int(getattr(u, "total_tokens", None) or (in_t + out_t))
+                total_t = in_t + out_t
                 usage["input"] = in_t
                 usage["output"] = out_t
                 usage["total"] = total_t
                 usage["unit"] = "TOKENS"
 
-            # ── cost — langfuse v2 Usage dict supports total_cost ──────────
+            # ── cost ───────────────────────────────────────────────────────
             cost = float(kwargs.get("response_cost") or 0)
-            if cost:
-                usage["total_cost"] = cost
 
             # ── per-call content (masked + truncated) ─────────────────────
             input_messages = _extract_input_messages(kwargs)
@@ -472,11 +540,19 @@ class OWUITraceCorrelator(CustomLogger):
                 "usage": usage if usage else None,
                 "metadata": _safe_data(metadata),
                 "level": level,
-                "status_message": status_message,
+                "status_message": _mask_string(status_message) if capture and status_message else ("LLM call failed" if level == "ERROR" else None),
             }
+            if kwargs.get("response_cost") is not None:
+                # Keep cost in the dedicated field; Langfuse v3 persists this as
+                # total_cost, whereas a generic Usage.totalCost is not surfaced
+                # by the v3 observation API.
+                gen_kwargs["cost_details"] = {"total": cost}
+            call_id = kwargs.get("litellm_call_id")
+            if call_id:
+                gen_kwargs["id"] = hashlib.sha256(f"{trace_id}:{call_id}".encode()).hexdigest()[:16]
 
             # Per-call input: the exact messages sent to the provider.
-            if input_messages is not None:
+            if capture and input_messages is not None:
                 gen_kwargs["input"] = _safe_data(input_messages)
 
             # Per-call output: completion text, tool calls, reasoning.
@@ -487,7 +563,7 @@ class OWUITraceCorrelator(CustomLogger):
                 output_payload["tool_calls"] = tool_calls
             if reasoning:
                 output_payload["reasoning"] = reasoning
-            if output_payload:
+            if capture and output_payload:
                 gen_kwargs["output"] = _safe_data(output_payload)
 
             # Gateway TTFT → Langfuse's native completion_start_time (renders
@@ -497,24 +573,37 @@ class OWUITraceCorrelator(CustomLogger):
                 if start_dt is not None:
                     gen_kwargs["completion_start_time"] = start_dt + timedelta(seconds=ttft_seconds)
 
-            if model_parameters:
+            if capture and model_parameters:
                 gen_kwargs["model_parameters"] = _safe_data(model_parameters)
 
-            self._lf.generation(**gen_kwargs)
-            # Flush immediately so the observation lands before the next request.
-            self._lf.flush()
-
-            log.info(
-                "OWUITraceCorrelator: generation logged — trace_id=%s cost=%.6f",
-                trace_id,
-                cost,
-            )
+            if len(json.dumps(gen_kwargs, default=str).encode()) > _MAX_RECORD_BYTES:
+                # Progressive degradation: drop input first, then output, before
+                # dropping the record. Long agentic turns keep output/usage/cost.
+                if gen_kwargs.get("input") is not None:
+                    gen_kwargs["input"] = None
+                    if len(json.dumps(gen_kwargs, default=str).encode()) <= _MAX_RECORD_BYTES:
+                        self._post_generation(gen_kwargs)
+                        return
+                if gen_kwargs.get("output") is not None:
+                    gen_kwargs["output"] = None
+                    if len(json.dumps(gen_kwargs, default=str).encode()) <= _MAX_RECORD_BYTES:
+                        self._post_generation(gen_kwargs)
+                        return
+                self.dropped += 1
+                self._throttled_log("record exceeds size cap after content removal")
+                return
+            self._post_generation(gen_kwargs)
 
         except Exception as exc:
-            log.warning(
-                "OWUITraceCorrelator: _emit_generation failed: %s",
-                exc,
-                exc_info=True,
+            self.failures += 1
+            self._throttled_log(f"_emit_generation failed: {exc}")
+
+    def _post_generation(self, gen_kwargs: dict) -> None:
+        self._lf.generation(**gen_kwargs)
+        if _debug():
+            log.info(
+                "OWUITraceCorrelator: generation logged — trace_id=%s",
+                gen_kwargs.get("trace_id"),
             )
 
     # ── event handlers ─────────────────────────────────────────────────────────
@@ -559,6 +648,6 @@ class OWUITraceCorrelator(CustomLogger):
         )
 
 
-# Module-level singleton — referenced by litellm-config.yaml as:
-#   success_callback: ["litellm_callbacks.owui_trace_correlator"]
+# Module-level singleton — referenced by config/litellm-tracing.yaml as:
+#   callbacks: ["litellm_callbacks.owui_trace_correlator"]
 owui_trace_correlator = OWUITraceCorrelator()

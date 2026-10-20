@@ -30,10 +30,10 @@ general_settings:
 # =============================================================================
 litellm_settings:
   drop_params: true                # strip unsupported params per-provider instead of failing
-  set_verbose: true                 # TEMP: header discovery for VS Code trace enrichment
   telemetry: false                  # disable Berri telemetry
   request_timeout: 600              # seconds
   # OTEL traces -> Grafana LGTM stack (insecure gRPC, internal network)
+  callbacks: ["otel"]
   # Langfuse cost correlation — works in tandem with the OWUI in-process
   #   Langfuse filter FUNCTION (config/functions/langfuse_filter.py).
   #   The custom callback (config/litellm-callbacks.py, mounted as
@@ -41,14 +41,23 @@ litellm_settings:
   #   and appends a cost-tagged "litellm_generation" observation to the trace
   #   the filter already created.  No duplicate top-level traces.
   #
+  #   Content capture is gated by OCCUMED_TRACING_CAPTURE_CONTENT (see
+  #   docker-compose.prod.yaml); usage/cost/TTFT always flow. Pilot-gated by
+  #   OCCUMED_TRACING_ENABLED + OCCUMED_TRACING_PILOT_USER_IDS.
+  #
+  #   The NATIVE "langfuse" callback is deliberately NOT registered: it traces
+  #   ALL gateway traffic (OWUI + VS Code + any client) into the proxy Langfuse
+  #   project with no config-level capture controls (its mask_input/mask_output
+  #   are per-request metadata steering that OWUI does not send, and the global
+  #   turn_off_message_logging would also redact the correlator's input source).
+  #   Gateway-wide usage/cost remains available via the LiteLLM Admin UI
+  #   (http://localhost:4000/ui) and Grafana OTEL.
+  #
   # Required OWUI connection header (Admin → Connections → LiteLLM → Headers):
   #   X-OpenWebUI-Message-Id: {{MESSAGE_ID}}
-  #   (X-OpenWebUI-Chat-Id is auto-forwarded by ENABLE_FORWARD_USER_INFO_HEADERS)
-  callbacks: ["otel"]
-  # "langfuse" → native callback, reads LANGFUSE_PUBLIC/SECRET_KEY from env.
-  # Points at the LiteLLM proxy Langfuse project (LANGFUSE_LITE_LLM_* keys in .env).
-  # Traces ALL traffic (OWUI + VS Code + any other client) with cost + token data.
-  success_callback: ["langfuse", "litellm_callbacks.owui_trace_correlator", "litellm_diagnostic.header_diagnostic_logger"]  # TEMP: +diagnostic
+  #   (X-OpenWebUI-Chat-Id and X-OpenWebUI-User-Id are auto-forwarded by
+  #    ENABLE_FORWARD_USER_INFO_HEADERS=true)
+  success_callback: ["litellm_callbacks.owui_trace_correlator"]
   # Correlator also on failure_callback: failed LLM calls emit ERROR-level
   # litellm_generation observations on the OWUI trace instead of vanishing.
   failure_callback: ["otel", "litellm_callbacks.owui_trace_correlator"]

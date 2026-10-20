@@ -2,28 +2,24 @@
 title: Langfuse Filter
 author: gillson (derived from open-webui Langfuse pipeline v4)
 author_url: https://github.com/jlgill
-version: 1.2.0
+version: 1.3.0
 license: MIT
 required_open_webui_version: 0.10.0
-requirements: langfuse==3.15.0
-description: >
-  In-process Langfuse v3 tracing Filter Function for Open WebUI. Modern replacement for
-  the external Langfuse filter *pipeline*. Uses DETERMINISTIC trace IDs (multi-worker /
-  multi-replica safe), typed observations (agent/chain/retriever/tool/reasoning/code/
-  generation/guardrail), PII/secret masking, usage + cost capture, and a stream() hook
-  for time-to-first-token (TTFT) telemetry. Configure keys/host via the Valves.
+requirements: langfuse==4.15.6
+description: In-process Langfuse v4 tracing filter for Open WebUI. Deterministic per-turn trace correlation, pilot-user gating via OCCUMED_* env vars, a unified content-capture contract (content flows only when OCCUMED_TRACING_CAPTURE_CONTENT=true), PII masking, bounded telemetry records, and failure-tolerant lifecycle hooks.
 """
 
 from __future__ import annotations
 
 import json
+import asyncio
 import os
 import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from langfuse import Langfuse
 
@@ -60,7 +56,7 @@ _OWUI_DETAILS_RE = re.compile(r"<details\b[^>]*>.*?</details>", re.DOTALL | re.I
 
 # Trace identity — tracks the code version; do NOT expose as a valve or it
 # will drift from the actual code.
-_TRACE_VERSION = "open-webui-langfuse-function-v1.2"
+_TRACE_VERSION = "open-webui-langfuse-function-v1.3"
 
 # Langfuse observation levels. Map to DEBUG/DEFAULT/WARNING/ERROR.
 _LEVEL_DEFAULT = "DEFAULT"
@@ -87,6 +83,10 @@ _MASK_REPLACEMENT = "[REDACTED]"
 _MAX_FIELD_CHARS = 20000
 _MAX_COLLECTION_ITEMS = 200
 _STREAM_CHARS_PER_TOKEN = 4.0
+# Per-observation export cap. Oversized records degrade progressively (input
+# dropped first, then output) before the record itself is dropped — long
+# agentic turns keep their output/usage instead of vanishing entirely.
+_MAX_RECORD_BYTES = 1_048_576
 
 # Structural toggles — the whole point of the observation structure.
 _INSERT_TAGS = True
@@ -106,16 +106,6 @@ def env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
 
 
 def env_float(name: str, default: float) -> float:
@@ -182,7 +172,7 @@ class Filter:
         secret_key: str = os.getenv("LANGFUSE_SECRET_KEY", "your-secret-key-here")
         public_key: str = os.getenv("LANGFUSE_PUBLIC_KEY", "your-public-key-here")
         host: str = os.getenv("LANGFUSE_HOST", os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com"))
-        enabled: bool = env_bool("LANGFUSE_FILTER_ENABLED", True)
+        enabled: bool = env_bool("LANGFUSE_FILTER_ENABLED", False)
         debug: bool = env_bool("DEBUG_MODE", False)
 
         # --- Langfuse project context (varies per deploy) ---
@@ -191,13 +181,13 @@ class Filter:
         sample_rate: float = env_float("LANGFUSE_SAMPLE_RATE", 1.0)
 
         # --- Capture toggles (privacy/cost/compliance) ---
-        capture_inputs: bool = True
-        capture_outputs: bool = True
-        capture_tool_arguments: bool = True
-        capture_tool_outputs: bool = True
-        capture_retriever_outputs: bool = True
-        capture_reasoning: bool = True
-        capture_code_interpreter: bool = True
+        capture_inputs: bool = env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
+        capture_outputs: bool = env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
+        capture_tool_arguments: bool = env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
+        capture_tool_outputs: bool = env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
+        capture_retriever_outputs: bool = env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
+        capture_reasoning: bool = env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
+        capture_code_interpreter: bool = env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
         capture_multimodal: bool = False
 
         # --- Masking ---
@@ -209,8 +199,6 @@ class Filter:
         # --- Ergonomics / perf escape hatches ---
         use_model_name_instead_of_id_for_generation: bool = env_bool("USE_MODEL_NAME", False)
         capture_stream_metrics: bool = True
-        flush_on_outlet: bool = env_bool("LANGFUSE_FLUSH_ON_OUTLET", False)
-        isolate_tracer_provider: bool = True
 
         # --- Background-task root-type list (changes as OWUI adds tasks) ---
         background_tasks: str = _BACKGROUND_TASKS
@@ -256,19 +244,89 @@ class Filter:
         # trace_id -> per-turn counter for stream_call_N span naming (agentic
         # turns stream once per LLM call; indexing keeps the spans distinguishable).
         self._stream_seq: Dict[str, int] = {}
-        self.suppressed_logs: set[str] = set()
+        self._last_log = float("-inf")
+        self.dropped = 0
         # Throttled lazy re-init so tracing self-heals after a startup race without a restart.
         self._last_init_attempt = 0.0
         self._init_retry_interval = 30.0
 
+    def _eligible(self, user: Optional[dict], metadata: Optional[dict], body: dict) -> bool:
+        allowed = {value.strip() for value in os.getenv("OCCUMED_TRACING_PILOT_USER_IDS", "").split(",") if value.strip()}
+        user_id = (user or {}).get("id")
+        context = metadata if isinstance(metadata, dict) else body.get("metadata") or {}
+        chat_id = context.get("chat_id") or body.get("chat_id")
+        message_id = context.get("message_id") or context.get("id") or body.get("message_id") or body.get("id")
+        return bool(env_bool("OCCUMED_TRACING_ENABLED", False) and self.valves.enabled
+                    and user_id in allowed and chat_id and chat_id != "local" and message_id
+                    and all(isinstance(value, str) and len(value) <= 200 and "{{" not in value
+                            for value in (user_id, chat_id, message_id)))
+
+    def _capture(self) -> bool:
+        return env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
+
+    def _payload(self, payload: dict, as_type: str, content: bool = True) -> dict:
+        """Apply the capture contract + size guard to an observation payload.
+
+        content=True  -> input/output are user content: gated by the capture valves.
+        content=False -> payload carries only counts/metrics (stream spans, guardrail
+        tallies): input/output flow regardless of capture since they hold no user
+        content. The capture-off metadata allowlist still applies either way.
+        """
+        if content:
+            permit_input = self._capture() and self.valves.capture_inputs
+            permit_output = self._capture() and self.valves.capture_outputs
+            if as_type == "tool":
+                permit_input = permit_input and self.valves.capture_tool_arguments
+                permit_output = permit_output and self.valves.capture_tool_outputs
+            if as_type == "retriever":
+                permit_output = permit_output and self.valves.capture_retriever_outputs
+            if not permit_input:
+                payload["input"] = None
+            if not permit_output:
+                payload["output"] = None
+        if not self._capture():
+            payload["model_parameters"] = None
+            payload["status_message"] = "Operation failed" if payload.get("level") == "ERROR" else None
+            if as_type in {"tool", "retriever"}:
+                payload["name"] = as_type
+            allowed = {
+                "interface", "plugin", "plugin_version", "chat_id", "session_id", "socket_session_id",
+                "message_id", "task", "user_id", "root_type", "observation_source", "source_index",
+                "metadata_count", "has_files", "has_embeds", "has_usage", "output_items_count",
+                "request_duration_seconds", "usage_total_reconciled", "stream_call_index",
+                "tool_call_count", "rag_source_count",
+            }
+            payload["metadata"] = {key: value for key, value in payload.get("metadata", {}).items() if key in allowed}
+        if self._record_size(payload) > _MAX_RECORD_BYTES:
+            if payload.get("input") is not None:
+                payload["input"] = None
+                if self._record_size(payload) <= _MAX_RECORD_BYTES:
+                    return payload
+            if payload.get("output") is not None:
+                payload["output"] = None
+                if self._record_size(payload) <= _MAX_RECORD_BYTES:
+                    return payload
+            self.dropped += 1
+            raise ValueError("Telemetry record exceeds configured size after content removal")
+        return payload
+
+    @staticmethod
+    def _record_size(payload: dict) -> int:
+        try:
+            return len(json.dumps(payload, default=str).encode())
+        except Exception:
+            return _MAX_RECORD_BYTES + 1
+
     # ------------------------------------------------------------------ logging
-    def log(self, message: str, suppress_repeats: bool = False, force: bool = False):
-        if suppress_repeats:
-            if message in self.suppressed_logs:
-                return
-            self.suppressed_logs.add(message)
-        if self.valves.debug or force:
+    def log(self, message: str, force: bool = False):
+        """Debug valve prints full detail; otherwise forced messages surface as a
+        throttled, detail-free one-liner (no hostnames/payloads in container logs)."""
+        if self.valves.debug:
             print(f"[Langfuse Filter] {message}")
+            return
+        if force and time.monotonic() - self._last_log >= 60:
+            self._last_log = time.monotonic()
+            print("[Langfuse Filter] telemetry degraded; details suppressed (enable the debug valve to diagnose)")
 
     # ----------------------------------------------------------------- lifecycle
     async def on_startup(self):
@@ -276,16 +334,22 @@ class Filter:
         self.set_langfuse()
 
     async def on_shutdown(self):
-        self.log(f"on_shutdown for {__name__}")
         if self.langfuse:
             try:
-                self.langfuse.flush()
-            except Exception as e:
-                self.log(f"flush on shutdown failed: {e}", force=True)
+                await asyncio.wait_for(asyncio.to_thread(self.langfuse.shutdown), timeout=5)
+            except Exception:
+                self.log("shutdown incomplete", force=True)
 
     async def on_valves_updated(self):
-        self.log("Valves updated, resetting Langfuse client.")
-        self.set_langfuse()
+        # NOTE: do NOT shutdown+rebuild the client here. langfuse v4's
+        # LangfuseResourceManager is a process-wide singleton keyed by public
+        # key; a shutdown() marks it dead (_shutdown=True, consumer threads
+        # joined) and it is NEVER removed from _instances — a rebuild with the
+        # same key silently returns the dead singleton and tracing stops
+        # until restart. Valve edits to host/keys therefore require a
+        # container restart; non-connection valves are read live from
+        # self.valves on every request.
+        self.log("Valves updated; connection changes require a container restart.")
 
     def _normalize_host(self, raw: str) -> str:
         value = (raw or "").strip().rstrip("/")
@@ -296,12 +360,7 @@ class Filter:
         return f"https://{value}"
 
     def _isolated_tracer_provider(self):
-        """Build a DEDICATED OpenTelemetry TracerProvider for langfuse so its span
-        processor does NOT attach to OWUI's global provider. Without this, langfuse
-        v3 reuses an existing global TracerProvider (OWUI's, when ENABLE_OTEL=true)
-        and exports every OWUI app/infra span - DB SELECTs, connects, /health probes
-        - into Langfuse. Passing langfuse its own provider isolates the two (langfuse
-        SDK `tracer_provider` parameter)."""
+        """Build a dedicated provider so Langfuse does not export OWUI infrastructure spans."""
         try:
             from opentelemetry.sdk.trace import TracerProvider
         except Exception as e:
@@ -321,55 +380,38 @@ class Filter:
                 return None
 
     def set_langfuse(self):
-        if not self.valves.enabled:
-            self.langfuse = None
-            self.log("Langfuse filter disabled by valve.")
+        if self.langfuse is not None or not self.valves.enabled or not env_bool("OCCUMED_TRACING_ENABLED", False):
             return
 
         try:
             kwargs = {
                 "secret_key": self.valves.secret_key,
                 "public_key": self.valves.public_key,
-                "host": self._normalize_host(self.valves.host),
-                "debug": self.valves.debug,
+                "base_url": self._normalize_host(self.valves.host),
+                "debug": False,
                 "sample_rate": self.valves.sample_rate,
+                "timeout": 2,
+                "flush_at": 32,
+                "flush_interval": 1,
+                "additional_headers": {"x-langfuse-ingestion-version": "4"},
             }
             if self.valves.environment:
                 kwargs["environment"] = self.valves.environment
             if self.valves.release:
                 kwargs["release"] = self.valves.release
-            if self.valves.enable_masking:
-                kwargs["mask"] = self.mask_data
+            kwargs["mask"] = self.mask_data
 
             # Isolate langfuse's tracer provider from OWUI's global OTEL provider so
             # OWUI app/infra spans don't leak into Langfuse (and vice-versa).
-            if self.valves.isolate_tracer_provider:
-                isolated_provider = self._isolated_tracer_provider()
-                if isolated_provider is not None:
-                    kwargs["tracer_provider"] = isolated_provider
-
-            try:
-                self.langfuse = Langfuse(**kwargs)
-            except TypeError:
-                kwargs.pop("mask", None)
-                kwargs.pop("sample_rate", None)
-                kwargs.pop("environment", None)
-                kwargs.pop("release", None)
-                kwargs.pop("tracer_provider", None)
-                self.langfuse = Langfuse(**kwargs)
-
-            try:
-                self.langfuse.auth_check()
-                self.log(f"Langfuse client initialized for host: {self.valves.host}", force=True)
-            except Exception as e:
-                # auth_check is an advisory probe. A transient failure (server not ready)
-                # must NOT permanently disable tracing: the SDK buffers events and flushes
-                # on a background thread, so keep the client and let it recover.
-                self.log(
-                    f"Langfuse auth check failed for host {self.valves.host}: {e} "
-                    "(keeping client; events will flush once reachable)",
-                    force=True,
-                )
+            isolated_provider = self._isolated_tracer_provider()
+            if isolated_provider is None:
+                return
+            kwargs["tracer_provider"] = isolated_provider
+            self.langfuse = Langfuse(**kwargs)
+            resources = self.langfuse._resources
+            for queue in (resources._score_ingestion_queue, resources._media_upload_queue):
+                with queue.mutex:
+                    queue.maxsize = 1024
         except Exception as e:
             self.log(f"Langfuse initialization failed: {e}", force=True)
             self.langfuse = None
@@ -685,7 +727,6 @@ class Filter:
             "model_id": model_id if model_id is not None else body.get("model"),
             "model_name": model_name,
             "user_id": user.get("id") if user else None,
-            "user_email": user.get("email") if user else None,
         }
 
     def _trace_name(self, chat_id: str, task_name: str, message_id: Optional[str] = None) -> str:
@@ -719,6 +760,9 @@ class Filter:
         input_data: Optional[Any] = None,
         output_data: Optional[Any] = None,
     ):
+        metadata = self._payload({"metadata": self._safe_data(metadata)}, "span")["metadata"]
+        input_data = input_data if self._capture() and self.valves.capture_inputs else None
+        output_data = output_data if self._capture() and self.valves.capture_outputs else None
         safe_metadata = {
             str(key): str(value)[:200]
             for key, value in metadata.items()
@@ -770,6 +814,7 @@ class Filter:
         model_parameters: Optional[dict] = None,
         usage_details: Optional[dict] = None,
         cost_details: Optional[dict] = None,
+        content: bool = True,
     ) -> Any:
         """Create an observation attached to a DETERMINISTIC trace by id."""
         kwargs = {
@@ -785,7 +830,7 @@ class Filter:
             "cost_details": cost_details,
             "trace_context": {"trace_id": trace_id},
         }
-        kwargs = {key: value for key, value in kwargs.items() if value is not None}
+        kwargs = {key: value for key, value in self._payload(kwargs, as_type, content=content).items() if value is not None}
 
         if hasattr(self.langfuse, "start_observation"):
             try:
@@ -844,6 +889,7 @@ class Filter:
         model_parameters: Optional[dict] = None,
         usage_details: Optional[dict] = None,
         cost_details: Optional[dict] = None,
+        content: bool = True,
     ) -> Any:
         kwargs = {
             "name": name,
@@ -857,7 +903,7 @@ class Filter:
             "usage_details": usage_details,
             "cost_details": cost_details,
         }
-        kwargs = {key: value for key, value in kwargs.items() if value is not None}
+        kwargs = {key: value for key, value in self._payload(kwargs, as_type, content=content).items() if value is not None}
 
         if hasattr(parent, "start_observation"):
             try:
@@ -934,6 +980,7 @@ class Filter:
 
     def _create_child_and_end(self, parent: Any, **kwargs: Any):
         child_kwargs = dict(kwargs)
+        content = bool(child_kwargs.pop("content_free", False))
         if "input" in child_kwargs and "input_data" not in child_kwargs:
             child_kwargs["input_data"] = child_kwargs.pop("input")
         if "output" in child_kwargs and "output_data" not in child_kwargs:
@@ -958,14 +1005,14 @@ class Filter:
             child_kwargs["metadata"] = {**metadata, "observation_extra": extra}
 
         try:
-            observation = self._start_child_observation(parent, **child_kwargs)
+            observation = self._start_child_observation(parent, content=content, **child_kwargs)
             self._end_observation(observation)
         except Exception as e:
             self.log(f"Failed to create observation {child_kwargs.get('name')}: {e}")
 
     def _create_on_trace_and_end(self, trace_id: str, **kwargs: Any):
         try:
-            observation = self._start_on_trace(trace_id, **kwargs)
+            observation = self._start_on_trace(trace_id, content=bool(kwargs.pop("content_free", False)), **kwargs)
             self._end_observation(observation)
         except Exception as e:
             self.log(f"Failed to create trace-level observation {kwargs.get('name')}: {e}")
@@ -1043,7 +1090,14 @@ class Filter:
                     except (TypeError, ValueError):
                         pass
 
+        primary_token_aliases = {
+            "input", "input_tokens", "prompt_tokens", "prompt_eval_count", "prompt_n",
+            "output", "output_tokens", "completion_tokens", "eval_count", "predicted_n",
+            "total", "total_tokens",
+        }
         for key, value in usage.items():
+            if key in primary_token_aliases:
+                continue
             if isinstance(value, int) and ("token" in key or key.endswith("_count")):
                 usage_details.setdefault(key, value)
 
@@ -1364,6 +1418,7 @@ class Filter:
             output_data=output,
             metadata={"observation_source": "function_stream", "stream_call_index": seq},
             level=self._level_default,
+            content_free=True,
         )
 
     # --------------------------------------------------------------------- inlet
@@ -1376,11 +1431,28 @@ class Filter:
         __model__: Optional[dict] = None,
         __request__: Any = None,
     ) -> dict:
+        try:
+            return await self._inlet(body, __event_emitter__, __user__, __metadata__, __model__, __request__)
+        except Exception:
+            self.log("inlet failed", force=True)
+            return body
+
+    async def _inlet(
+        self,
+        body: dict,
+        __event_emitter__: Any = None,
+        __user__: Optional[dict] = None,
+        __metadata__: Optional[dict] = None,
+        __model__: Optional[dict] = None,
+        __request__: Any = None,
+    ) -> dict:
         self.log("INLET called")
         if not isinstance(body, dict):
             return body
+        if not self._eligible(__user__, __metadata__, body):
+            return body
         if not self._ensure_langfuse():
-            self.log("Langfuse client not initialized; inlet skipped.", suppress_repeats=True)
+            self.log("Langfuse client not initialized; inlet skipped.", force=True)
             return body
 
         try:
@@ -1395,7 +1467,7 @@ class Filter:
             self._gc_dicts()
 
             model_id, model_name = self._extract_model_info(body)
-            user_email = (__user__ or {}).get("email") or (__user__ or {}).get("id")
+            user_email = (__user__ or {}).get("id")
             trace_metadata = self._trace_metadata(
                 body=body,
                 chat_id=chat_id,
@@ -1416,7 +1488,7 @@ class Filter:
                 trace_id,
                 as_type="event",
                 name="user_input",
-                input_data=user_message if user_message else None,
+                input_data=user_message if user_message and self.valves.capture_inputs else None,
                 metadata={**trace_metadata, "observation_source": "function_inlet"},
                 level=self._level_user_event,
             )
@@ -1444,7 +1516,19 @@ class Filter:
         __event_emitter__: Any = None,
         __metadata__: Optional[dict] = None,
     ) -> dict:
-        if not self.valves.capture_stream_metrics:
+        try:
+            return await self._stream_event(event, __event_emitter__, __metadata__)
+        except Exception:
+            self.log("stream failed", force=True)
+            return event
+
+    async def _stream_event(
+        self,
+        event: dict,
+        __event_emitter__: Any = None,
+        __metadata__: Optional[dict] = None,
+    ) -> dict:
+        if not self.valves.capture_stream_metrics or not self.valves.enabled or not env_bool("OCCUMED_TRACING_ENABLED", False):
             return event
         if not self._ensure_langfuse():
             return event
@@ -1453,7 +1537,7 @@ class Filter:
             metadata = __metadata__ if isinstance(__metadata__, dict) else {}
             chat_id, message_id, _session_id, explicit_task = self._ids(metadata, {})
             trace_id = self._trace_id_for(chat_id, message_id, explicit_task)
-            if not trace_id:
+            if not trace_id or trace_id not in self._start_ts:
                 return event
 
             now = time.perf_counter()
@@ -1485,11 +1569,26 @@ class Filter:
         __user__: Optional[dict] = None,
         __metadata__: Optional[dict] = None,
     ) -> dict:
+        try:
+            return await self._outlet(body, __event_emitter__, __user__, __metadata__)
+        except Exception:
+            self.log("outlet failed", force=True)
+            return body
+
+    async def _outlet(
+        self,
+        body: dict,
+        __event_emitter__: Any = None,
+        __user__: Optional[dict] = None,
+        __metadata__: Optional[dict] = None,
+    ) -> dict:
         self.log("OUTLET called")
         if not isinstance(body, dict):
             return body
+        if not self._eligible(__user__, __metadata__, body):
+            return body
         if not self._ensure_langfuse():
-            self.log("Langfuse client not initialized; outlet skipped.", suppress_repeats=True)
+            self.log("Langfuse client not initialized; outlet skipped.", force=True)
             return body
 
         metadata = __metadata__ if isinstance(__metadata__, dict) else (body.get("metadata") or {})
@@ -1559,7 +1658,7 @@ class Filter:
             trace_metadata["request_duration_seconds"] = round(time.perf_counter() - start, 4)
 
         tags = self._build_tags(task_name)
-        user_email = (__user__ or {}).get("email") or (__user__ or {}).get("id") or trace_metadata.get("user_email")
+        user_id = (__user__ or {}).get("id")
         # Trace input = cleaned prior conversation context only. The final assistant turn
         # belongs in `output`, not `input`, so it is excluded here (and its <details>
         # markup is stripped from any earlier assistant turns).
@@ -1586,7 +1685,7 @@ class Filter:
         self._apply_trace_attributes(
             root,
             name=trace_name,
-            user_id=user_email,
+            user_id=user_id,
             session_id=chat_id,
             tags=tags,
             metadata=trace_metadata,
@@ -1621,7 +1720,7 @@ class Filter:
                         root,
                         as_type="chain",
                         name="rag",
-                        input_data={"query": user_query} if user_query else None,
+                        input_data={"query": user_query} if user_query and self.valves.capture_inputs else None,
                         metadata={
                             **trace_metadata,
                             "rag_source_count": len(source_observations),
@@ -1646,7 +1745,7 @@ class Filter:
             "model_name": model_name,
             "tool_call_count": len(tool_names),
             "tool_names": tool_names,
-            "usage_raw": usage_raw,
+            "usage_raw": None,
             "usage_total_reconciled": usage_total_reconciled,
         }
 
@@ -1665,10 +1764,15 @@ class Filter:
                 metadata=generation_metadata,
                 level=self._level_default,
                 model_parameters=self._model_parameters(body),
+                # Usage always flows (metrics, not content): the trace keeps
+                # token counts even when the litellm correlator is disabled or
+                # gated off. OWUI's aggregated usage for multi-call agentic
+                # turns is unreliable — _extract_usage_details reconciles
+                # total = input + output and flags it in metadata; accurate
+                # per-call numbers live on the litellm_generation observations.
                 usage_details=usage_details,
                 cost_details=cost_details,
             )
-            self._update_generation_usage(generation, usage_details, cost_details)
             self._end_observation(generation)
         except Exception as e:
             self.log(f"Failed to create LLM generation: {e}", force=True)
@@ -1710,6 +1814,7 @@ class Filter:
                     },
                     level=self._level_guardrail,
                     metadata={**trace_metadata, "observation_source": "function_masking"},
+                    content_free=True,
                 )
 
         try:
@@ -1726,11 +1831,5 @@ class Filter:
                 pass
         # Turn complete — clear the per-turn stream counter.
         self._stream_seq.pop(trace_id, None)
-
-        if self.valves.flush_on_outlet:
-            try:
-                self.langfuse.flush()
-            except Exception as e:
-                self.log(f"Failed to flush Langfuse data: {e}", force=True)
 
         return body
