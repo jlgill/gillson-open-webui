@@ -2,18 +2,17 @@
 title: Langfuse Filter
 author: gillson (derived from open-webui Langfuse pipeline v4)
 author_url: https://github.com/jlgill
-version: 1.3.0
+version: 1.3.1
 license: MIT
 required_open_webui_version: 0.10.0
 requirements: langfuse==4.15.6
-description: In-process Langfuse v4 tracing filter for Open WebUI. Deterministic per-turn trace correlation, pilot-user gating via OCCUMED_* env vars, a unified content-capture contract (content flows only when OCCUMED_TRACING_CAPTURE_CONTENT=true), PII masking, bounded telemetry records, and failure-tolerant lifecycle hooks.
+description: In-process Langfuse v4 tracing filter for Open WebUI. Valve-controlled tracing and content capture, deterministic per-turn trace correlation, PII masking, bounded telemetry records, and failure-tolerant lifecycle hooks.
 """
 
 from __future__ import annotations
 
 import json
 import asyncio
-import os
 import re
 import time
 import uuid
@@ -56,7 +55,7 @@ _OWUI_DETAILS_RE = re.compile(r"<details\b[^>]*>.*?</details>", re.DOTALL | re.I
 
 # Trace identity — tracks the code version; do NOT expose as a valve or it
 # will drift from the actual code.
-_TRACE_VERSION = "open-webui-langfuse-function-v1.3"
+_TRACE_VERSION = "open-webui-langfuse-function-v1.3.1"
 
 # Langfuse observation levels. Map to DEBUG/DEFAULT/WARNING/ERROR.
 _LEVEL_DEFAULT = "DEFAULT"
@@ -99,23 +98,6 @@ _BACKGROUND_TASKS = (
     "query_generation,image_prompt_generation,autocomplete_generation,"
     "function_calling,moa_response_generation"
 )
-
-
-def env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def env_float(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        return default
 
 
 def get_content_from_message(message: dict) -> Optional[str]:
@@ -169,25 +151,25 @@ class Filter:
     class Valves(BaseModel):
         # --- Connection (per-deployment) ---
         priority: int = 0
-        secret_key: str = os.getenv("LANGFUSE_SECRET_KEY", "your-secret-key-here")
-        public_key: str = os.getenv("LANGFUSE_PUBLIC_KEY", "your-public-key-here")
-        host: str = os.getenv("LANGFUSE_HOST", os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com"))
-        enabled: bool = env_bool("LANGFUSE_FILTER_ENABLED", False)
-        debug: bool = env_bool("DEBUG_MODE", False)
+        secret_key: str = "your-secret-key-here"
+        public_key: str = "your-public-key-here"
+        host: str = "https://cloud.langfuse.com"
+        enabled: bool = False
+        debug: bool = False
 
         # --- Langfuse project context (varies per deploy) ---
-        environment: str | None = os.getenv("LANGFUSE_TRACING_ENVIRONMENT")
-        release: str | None = os.getenv("LANGFUSE_RELEASE")
-        sample_rate: float = env_float("LANGFUSE_SAMPLE_RATE", 1.0)
+        environment: str | None = None
+        release: str | None = None
+        sample_rate: float = 1.0
 
         # --- Capture toggles (privacy/cost/compliance) ---
-        capture_inputs: bool = env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
-        capture_outputs: bool = env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
-        capture_tool_arguments: bool = env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
-        capture_tool_outputs: bool = env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
-        capture_retriever_outputs: bool = env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
-        capture_reasoning: bool = env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
-        capture_code_interpreter: bool = env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
+        capture_inputs: bool = False
+        capture_outputs: bool = False
+        capture_tool_arguments: bool = False
+        capture_tool_outputs: bool = False
+        capture_retriever_outputs: bool = False
+        capture_reasoning: bool = False
+        capture_code_interpreter: bool = False
         capture_multimodal: bool = False
 
         # --- Masking ---
@@ -197,7 +179,7 @@ class Filter:
         )
 
         # --- Ergonomics / perf escape hatches ---
-        use_model_name_instead_of_id_for_generation: bool = env_bool("USE_MODEL_NAME", False)
+        use_model_name_instead_of_id_for_generation: bool = False
         capture_stream_metrics: bool = True
 
         # --- Background-task root-type list (changes as OWUI adds tasks) ---
@@ -250,19 +232,8 @@ class Filter:
         self._last_init_attempt = 0.0
         self._init_retry_interval = 30.0
 
-    def _eligible(self, user: Optional[dict], metadata: Optional[dict], body: dict) -> bool:
-        allowed = {value.strip() for value in os.getenv("OCCUMED_TRACING_PILOT_USER_IDS", "").split(",") if value.strip()}
-        user_id = (user or {}).get("id")
-        context = metadata if isinstance(metadata, dict) else body.get("metadata") or {}
-        chat_id = context.get("chat_id") or body.get("chat_id")
-        message_id = context.get("message_id") or context.get("id") or body.get("message_id") or body.get("id")
-        return bool(env_bool("OCCUMED_TRACING_ENABLED", False) and self.valves.enabled
-                    and user_id in allowed and chat_id and chat_id != "local" and message_id
-                    and all(isinstance(value, str) and len(value) <= 200 and "{{" not in value
-                            for value in (user_id, chat_id, message_id)))
-
     def _capture(self) -> bool:
-        return env_bool("OCCUMED_TRACING_CAPTURE_CONTENT", False)
+        return self.valves.capture_inputs or self.valves.capture_outputs
 
     def _payload(self, payload: dict, as_type: str, content: bool = True) -> dict:
         """Apply the capture contract + size guard to an observation payload.
@@ -380,7 +351,7 @@ class Filter:
                 return None
 
     def set_langfuse(self):
-        if self.langfuse is not None or not self.valves.enabled or not env_bool("OCCUMED_TRACING_ENABLED", False):
+        if self.langfuse is not None or not self.valves.enabled:
             return
 
         try:
@@ -980,7 +951,7 @@ class Filter:
 
     def _create_child_and_end(self, parent: Any, **kwargs: Any):
         child_kwargs = dict(kwargs)
-        content = bool(child_kwargs.pop("content_free", False))
+        content = not bool(child_kwargs.pop("content_free", False))
         if "input" in child_kwargs and "input_data" not in child_kwargs:
             child_kwargs["input_data"] = child_kwargs.pop("input")
         if "output" in child_kwargs and "output_data" not in child_kwargs:
@@ -1012,7 +983,7 @@ class Filter:
 
     def _create_on_trace_and_end(self, trace_id: str, **kwargs: Any):
         try:
-            observation = self._start_on_trace(trace_id, content=bool(kwargs.pop("content_free", False)), **kwargs)
+            observation = self._start_on_trace(trace_id, content=not bool(kwargs.pop("content_free", False)), **kwargs)
             self._end_observation(observation)
         except Exception as e:
             self.log(f"Failed to create trace-level observation {kwargs.get('name')}: {e}")
@@ -1447,9 +1418,11 @@ class Filter:
         __request__: Any = None,
     ) -> dict:
         self.log("INLET called")
+        if __request__ is not None:
+            __request__.state.langfuse_tracing = None
         if not isinstance(body, dict):
             return body
-        if not self._eligible(__user__, __metadata__, body):
+        if not self.valves.enabled:
             return body
         if not self._ensure_langfuse():
             self.log("Langfuse client not initialized; inlet skipped.", force=True)
@@ -1462,6 +1435,19 @@ class Filter:
             trace_id = self._trace_id_for(chat_id, message_id, explicit_task)
             if not trace_id:
                 return body
+
+            if __request__ is not None:
+                __request__.state.langfuse_tracing = {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "enabled": self.valves.enabled,
+                    "capture_inputs": self.valves.capture_inputs,
+                    "capture_outputs": self.valves.capture_outputs,
+                    "capture_tool_arguments": self.valves.capture_tool_arguments,
+                    "capture_tool_outputs": self.valves.capture_tool_outputs,
+                    "capture_retriever_outputs": self.valves.capture_retriever_outputs,
+                    "capture_reasoning": self.valves.capture_reasoning,
+                }
 
             self._start_ts[trace_id] = time.perf_counter()
             self._gc_dicts()
@@ -1528,7 +1514,7 @@ class Filter:
         __event_emitter__: Any = None,
         __metadata__: Optional[dict] = None,
     ) -> dict:
-        if not self.valves.capture_stream_metrics or not self.valves.enabled or not env_bool("OCCUMED_TRACING_ENABLED", False):
+        if not self.valves.capture_stream_metrics or not self.valves.enabled:
             return event
         if not self._ensure_langfuse():
             return event
@@ -1585,7 +1571,7 @@ class Filter:
         self.log("OUTLET called")
         if not isinstance(body, dict):
             return body
-        if not self._eligible(__user__, __metadata__, body):
+        if not self.valves.enabled:
             return body
         if not self._ensure_langfuse():
             self.log("Langfuse client not initialized; outlet skipped.", force=True)

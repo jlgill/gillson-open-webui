@@ -255,15 +255,6 @@ services:
       - OWUI_LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
       - OWUI_LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
 
-      # Langfuse tracing pilot (shared contract with the OWUI filter function).
-      #   OCCUMED_TRACING_ENABLED          — master switch (double opt-in with the filter valve)
-      #   OCCUMED_TRACING_PILOT_USER_IDS   — comma-separated OWUI user IDs allowed to trace
-      #   OCCUMED_TRACING_CAPTURE_CONTENT  — true = prompts/outputs/tool args flow to Langfuse
-      #                                         (masked); false = metrics/usage/cost only
-      #   OWUI_TRACE_CORRELATOR_DEBUG      — verbose correlator logging (off in normal ops)
-      - OCCUMED_TRACING_ENABLED=${OCCUMED_TRACING_ENABLED:-false}
-      - OCCUMED_TRACING_PILOT_USER_IDS=${OCCUMED_TRACING_PILOT_USER_IDS:-}
-      - OCCUMED_TRACING_CAPTURE_CONTENT=${OCCUMED_TRACING_CAPTURE_CONTENT:-false}
       - OWUI_TRACE_CORRELATOR_DEBUG=${OWUI_TRACE_CORRELATOR_DEBUG:-false}
     ports:
       - "127.0.0.1:4000:4000"   # localhost only; internal services use http://litellm:4000
@@ -465,7 +456,7 @@ services:
       - owui-network
 
   open-webui:
-    image: ghcr.io/jlgill/gillson-open-webui:v0.12.3-custom.1
+    image: ghcr.io/jlgill/gillson-open-webui:v0.12.3
     container_name: owui-app
     depends_on:
       postgres:
@@ -522,16 +513,6 @@ services:
       # metadata via the Langfuse filter pipeline, not these headers.)
       - ENABLE_FORWARD_USER_INFO_HEADERS=true
 
-      # Langfuse tracing pilot (shared contract with the LiteLLM correlator;
-      # see the litellm service block for semantics). The filter function also
-      # has its own `enabled` valve — tracing requires BOTH this env var and
-      # the valve. NOTE: importing the v1.3.0 filter auto-installs langfuse
-      # 4.15.6 container-wide (frontmatter requirements); deactivate the old
-      # langfuse_filter function BEFORE importing the new one.
-      - OCCUMED_TRACING_ENABLED=${OCCUMED_TRACING_ENABLED:-false}
-      - OCCUMED_TRACING_PILOT_USER_IDS=${OCCUMED_TRACING_PILOT_USER_IDS:-}
-      - OCCUMED_TRACING_CAPTURE_CONTENT=${OCCUMED_TRACING_CAPTURE_CONTENT:-false}
-      
       # Telemetry off
       - SCARF_NO_ANALYTICS=true
       - DO_NOT_TRACK=true

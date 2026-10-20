@@ -22,14 +22,12 @@ NOTE: The LiteLLM container ships langfuse v2 (2.59.7), not v4. This callback
 uses the langfuse v2 SDK API: lf.generation(trace_id=..., usage={...}).
 The langfuse v2 Usage dict supports total_cost for passing LiteLLM's cost data.
 
-v1.3.0 (issue #1 hardening):
+v1.3.1 (valve-controlled tracing; retains issue #1 hardening):
 - No per-request flush(); SDK background batching with bounded queues (1024),
   short timeouts, and an atexit shutdown flush (LiteLLM's proxy shutdown hook
   only flushes its NATIVE langfuse logger, not custom loggers).
-- Content capture gated by OCCUMED_TRACING_CAPTURE_CONTENT (same contract as the
-  OWUI filter); usage/cost/TTFT/metadata always flow.
-- Pilot gating via OCCUMED_TRACING_ENABLED + OCCUMED_TRACING_PILOT_USER_IDS,
-  matching the filter's _eligible().
+- Enablement and capture follow the OWUI filter valves forwarded in the
+    server-generated X-OpenWebUI-Langfuse header; no pilot environment gates.
 - 1MB per-record cap with progressive degradation (input dropped, then output)
   before dropping the record; drop counter surfaced via throttled detail-free log.
 - Failure events emit ERROR-level generations with generic status text when
@@ -44,13 +42,9 @@ Setup checklist
        success_callback: ["litellm_callbacks.owui_trace_correlator"]
        failure_callback: ["litellm_callbacks.owui_trace_correlator"]
 
-3. OWUI Admin → Connections → (LiteLLM entry) → Headers — add:
-       {"X-OpenWebUI-Message-Id": "{{MESSAGE_ID}}"}
-   (X-OpenWebUI-Chat-Id and X-OpenWebUI-User-Id are auto-forwarded by
-    ENABLE_FORWARD_USER_INFO_HEADERS=true in docker-compose.prod.yaml.
-    NOTE: if FORWARD_USER_INFO_HEADER_JWT_SECRET is ever set, OWUI sends a
-    single JWT header instead of X-OpenWebUI-User-Id and this correlator
-    goes blind — keep that env var unset while using header-based gating.)
+3. Install the updated OWUI filter and backend header bridge. OWUI forwards
+    X-OpenWebUI-Langfuse automatically only for requests authorized by the filter.
+    No manually configured tracing headers or user-info forwarding are required.
 
 4. LANGFUSE_HOST / OWUI_LANGFUSE_PUBLIC_KEY / OWUI_LANGFUSE_SECRET_KEY must be set
     in the litellm container environment (already present in docker-compose.prod.yaml).
@@ -86,17 +80,8 @@ log.setLevel(logging.WARNING)
 _MAX_RECORD_BYTES = 1_048_576
 
 
-def _enabled(name: str) -> bool:
-    return os.getenv(name, "false").lower() == "true"
-
-
 def _debug() -> bool:
     return os.getenv("OWUI_TRACE_CORRELATOR_DEBUG", "false").lower() == "true"
-
-
-def _pilot(user_id: Optional[str]) -> bool:
-    allowed = {value.strip() for value in os.getenv("OCCUMED_TRACING_PILOT_USER_IDS", "").split(",") if value.strip()}
-    return _enabled("OCCUMED_TRACING_ENABLED") and bool(user_id and user_id in allowed)
 
 
 # ── trace-ID formula ──────────────────────────────────────────────────────────
@@ -462,14 +447,17 @@ class OWUITraceCorrelator(CustomLogger):
         """Build and post the litellm_generation observation (success or failure)."""
         try:
             hdrs = self._proxy_headers(kwargs)
-            chat_id = self._header(hdrs, "X-OpenWebUI-Chat-Id")
-            message_id = self._header(hdrs, "X-OpenWebUI-Message-Id")
-            user_id = self._header(hdrs, "X-OpenWebUI-User-Id")
-
-            # Skip non-OWUI calls and temporary ("local") sessions.
-            if not _pilot(user_id) or not chat_id or chat_id == "local" or not message_id:
+            raw_policy = self._header(hdrs, "X-OpenWebUI-Langfuse")
+            if not raw_policy:
                 return
-            if any("{{" in value or len(value) > 200 for value in (chat_id, message_id, user_id)):
+            policy = json.loads(raw_policy)
+            if not isinstance(policy, dict) or policy.get("enabled") is not True:
+                return
+            chat_id = policy.get("chat_id")
+            message_id = policy.get("message_id")
+            if not isinstance(chat_id, str) or not chat_id or not isinstance(message_id, str) or not message_id:
+                return
+            if any("{{" in value or len(value) > 200 for value in (chat_id, message_id)):
                 return
             if self._lf is None and time.monotonic() - self._last_init >= 30:
                 self._last_init = time.monotonic()
@@ -478,7 +466,9 @@ class OWUITraceCorrelator(CustomLogger):
                 return
 
             trace_id = _trace_id(chat_id, message_id)
-            capture = _enabled("OCCUMED_TRACING_CAPTURE_CONTENT")
+            capture_inputs = policy.get("capture_inputs") is True
+            capture_outputs = policy.get("capture_outputs") is True
+            capture = capture_inputs or capture_outputs
 
             # ── usage dict (langfuse v2 accepts plain dict) ────────────────
             usage: dict[str, Any] = {}
@@ -552,18 +542,36 @@ class OWUITraceCorrelator(CustomLogger):
                 gen_kwargs["id"] = hashlib.sha256(f"{trace_id}:{call_id}".encode()).hexdigest()[:16]
 
             # Per-call input: the exact messages sent to the provider.
-            if capture and input_messages is not None:
-                gen_kwargs["input"] = _safe_data(input_messages)
+            if capture_inputs and input_messages is not None:
+                captured_messages = []
+                for message in input_messages:
+                    if isinstance(message, dict):
+                        if message.get("role") in {"tool", "function"}:
+                            if policy.get("capture_tool_outputs") is not True:
+                                continue
+                            tool_name = message.get("name")
+                            if tool_name in {"search_web", "fetch_url", "query_knowledge_files", "view_knowledge_file", "view_file"}:
+                                if policy.get("capture_retriever_outputs") is not True:
+                                    continue
+                        message = dict(message)
+                        if policy.get("capture_tool_arguments") is not True:
+                            message.pop("tool_calls", None)
+                            message.pop("function_call", None)
+                        if policy.get("capture_reasoning") is not True:
+                            message.pop("reasoning", None)
+                            message.pop("reasoning_content", None)
+                    captured_messages.append(message)
+                gen_kwargs["input"] = _safe_data(captured_messages)
 
             # Per-call output: completion text, tool calls, reasoning.
             output_payload: dict[str, Any] = {}
             if output_text is not None:
                 output_payload["text"] = output_text
-            if tool_calls:
+            if tool_calls and policy.get("capture_tool_arguments") is True:
                 output_payload["tool_calls"] = tool_calls
-            if reasoning:
+            if reasoning and policy.get("capture_reasoning") is True:
                 output_payload["reasoning"] = reasoning
-            if capture and output_payload:
+            if capture_outputs and output_payload:
                 gen_kwargs["output"] = _safe_data(output_payload)
 
             # Gateway TTFT → Langfuse's native completion_start_time (renders

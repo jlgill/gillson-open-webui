@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 from string import punctuation
@@ -231,6 +232,17 @@ async def get_headers_and_cookies(
     if config.get('headers') and isinstance(config.get('headers'), dict):
         custom_headers = await get_custom_headers(config.get('headers'), user, metadata, request=request)
         headers.update(custom_headers)
+
+    headers = {name: value for name, value in headers.items() if name.lower() != 'x-openwebui-langfuse'}
+    tracing = getattr(getattr(request, 'state', None), 'langfuse_tracing', None)
+    if (
+        isinstance(tracing, dict)
+        and tracing.get('enabled') is True
+        and metadata
+        and tracing.get('chat_id') == metadata.get('chat_id')
+        and tracing.get('message_id') == metadata.get('message_id')
+    ):
+        headers['X-OpenWebUI-Langfuse'] = json.dumps(tracing)
 
     return headers, cookies
 

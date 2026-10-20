@@ -41,9 +41,9 @@ litellm_settings:
   #   and appends a cost-tagged "litellm_generation" observation to the trace
   #   the filter already created.  No duplicate top-level traces.
   #
-  #   Content capture is gated by OCCUMED_TRACING_CAPTURE_CONTENT (see
-  #   docker-compose.prod.yaml); usage/cost/TTFT always flow. Pilot-gated by
-  #   OCCUMED_TRACING_ENABLED + OCCUMED_TRACING_PILOT_USER_IDS.
+  #   Enablement and content capture follow the OWUI Function valves via the
+  #   server-generated X-OpenWebUI-Langfuse header. With the filter enabled,
+  #   usage/cost/TTFT flow even when content capture valves are off.
   #
   #   The NATIVE "langfuse" callback is deliberately NOT registered: it traces
   #   ALL gateway traffic (OWUI + VS Code + any client) into the proxy Langfuse
@@ -53,10 +53,8 @@ litellm_settings:
   #   Gateway-wide usage/cost remains available via the LiteLLM Admin UI
   #   (http://localhost:4000/ui) and Grafana OTEL.
   #
-  # Required OWUI connection header (Admin → Connections → LiteLLM → Headers):
-  #   X-OpenWebUI-Message-Id: {{MESSAGE_ID}}
-  #   (X-OpenWebUI-Chat-Id and X-OpenWebUI-User-Id are auto-forwarded by
-  #    ENABLE_FORWARD_USER_INFO_HEADERS=true)
+  # Requires the updated OWUI backend header bridge and filter v1.3.1.
+  # No manually configured tracing headers or pilot environment settings.
   success_callback: ["litellm_callbacks.owui_trace_correlator"]
   # Correlator also on failure_callback: failed LLM calls emit ERROR-level
   # litellm_generation observations on the OWUI trace instead of vanishing.
