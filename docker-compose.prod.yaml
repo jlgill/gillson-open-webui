@@ -456,8 +456,10 @@ services:
       - owui-network
 
   open-webui:
-    image: ghcr.io/jlgill/gillson-open-webui:v0.12.3
+    image: ghcr.io/jlgill/gillson-open-webui:90ad3d0
     container_name: owui-app
+    entrypoint: ["/bin/sh", "/app/owui-oauth-entrypoint.sh"]
+    command: ["bash", "start.sh"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -469,6 +471,7 @@ services:
         condition: service_healthy
     volumes:
       - owui-data:/app/backend/data
+      - ./scripts/owui-prod-entrypoint.sh:/app/owui-oauth-entrypoint.sh:ro
     environment:
       # Database — decomposed instead of DATABASE_URL with embedded password
       - DATABASE_TYPE=postgresql
@@ -482,6 +485,19 @@ services:
       - WEBUI_SECRET_KEY_FILE=/run/secrets/webui_secret_key
       - WEBUI_AUTH=true
       - WEBUI_SESSION_COOKIE_SECURE=true
+
+      - WEBUI_URL=https://owui.gillson.us
+      - ENABLE_OAUTH=true
+      - ENABLE_OAUTH_PERSISTENT_CONFIG=false
+      - ENABLE_OAUTH_SIGNUP=false
+      - OAUTH_MERGE_ACCOUNTS_BY_EMAIL=true
+      - OAUTH_AUTO_REDIRECT=false
+      - ENABLE_OAUTH_ROLE_MANAGEMENT=false
+      - ENABLE_OAUTH_GROUP_MANAGEMENT=false
+      - OAUTH_ALLOWED_DOMAINS=gillson.me
+      - MICROSOFT_CLIENT_ID=26313121-1f1d-4263-846f-90e5385adab3
+      - MICROSOFT_CLIENT_TENANT_ID=1b4ec955-c987-44c3-a62f-d1cd054d1ddc
+      - MICROSOFT_REDIRECT_URI=https://owui.gillson.us/oauth/microsoft/callback
       
       #OWUI Configuration
       - ENABLE_KB_EXEC=True
@@ -543,6 +559,7 @@ services:
           cpus: '4'
     secrets:
       - webui_secret_key
+      - owui_oauth_client_secret
     networks:
       - owui-network
       - outline-net
@@ -677,14 +694,12 @@ services:
   # SafePlaywrightURLLoader in retrieval/web/utils.py connects via
   # p.chromium.connect(ws://playwright:3000) — must speak the Playwright WS
   # protocol, NOT MCP. Image tag MUST match the playwright Python pkg version
-  # installed in the owui-app image (currently 1.60.0 — the running image was
-  # built before requirements.txt was bumped to 1.62.0). When owui-app is
-  # rebuilt with playwright==1.62.0, bump this to v1.62.0-noble to match.
+  # installed in the owui-app image (currently 1.62.0).
   playwright:
-    image: mcr.microsoft.com/playwright:v1.60.0-noble
+    image: mcr.microsoft.com/playwright:v1.62.0-noble
     container_name: owui-playwright-loader
     restart: unless-stopped
-    command: npx -y playwright@1.60.0 run-server --port 3000 --host 0.0.0.0
+    command: npx -y playwright@1.62.0 run-server --port 3000 --host 0.0.0.0
     # No host port mapping: Grafana already binds 127.0.0.1:3000. owui-app
     # reaches this via owui-network DNS as ws://playwright:3000.
     healthcheck:
@@ -734,6 +749,8 @@ secrets:
     file: ./secrets/grafana_oauth_client_secret.txt
   langfuse_oauth_client_secret:
     file: ./secrets/langfuse_oauth_client_secret.txt
+  owui_oauth_client_secret:
+    file: ./secrets/owui_oauth_client_secret.txt
 
 
 volumes:
