@@ -3057,7 +3057,18 @@ async def build_chat_response_context(request, form_data, user, model, metadata,
     }
 
 
+def tool_call_timing(tool_call: dict) -> dict:
+    """Wall-clock bounds of the tool invocation, set by execute_tool_call.
+
+    Kept on function_call_output items as local bookkeeping (like reasoning items) so
+    observability filters can time tools exactly; provider payloads never include them.
+    """
+    return {key: tool_call[key] for key in ('started_at', 'ended_at') if isinstance(tool_call.get(key), float)}
+
+
 async def execute_tool_call(form_data, metadata, event_caller, tool_call):
+    tool_call.pop('started_at', None)
+    tool_call.pop('ended_at', None)
     error = resolve_tool_call(tool_call, metadata.get('tools', {}))
     if error:
         return {}, error, None, None, False
@@ -3109,6 +3120,8 @@ async def execute_tool_call(form_data, metadata, event_caller, tool_call):
         ):
             return params, 'Error: tool call was not approved.', tool, tool_type, direct_tool
 
+        # Started after approval so user think time is not counted as tool time.
+        tool_call['started_at'] = time.time()
         if direct_tool:
             if not event_caller:
                 result = 'Error: Browser session is not connected for this direct tool.'
@@ -3136,6 +3149,8 @@ async def execute_tool_call(form_data, metadata, event_caller, tool_call):
             result = await function(**params)
     except Exception as e:
         result = {'error': str(e)}
+    if 'started_at' in tool_call:
+        tool_call['ended_at'] = time.time()
     return params, result, tool, tool_type, direct_tool
 
 
@@ -3272,6 +3287,7 @@ async def resume_tool_calls(request, form_data, user, model, metadata, message) 
                 'status': item['status'],
                 **({'files': display_files} if display_files else {}),
                 **({'embeds': embeds} if embeds else {}),
+                **tool_call_timing(tool_call),
             }
             output = await complete_tool_call(chat_id, message_id, item, result_item)
         except BaseException:
@@ -5786,6 +5802,7 @@ async def streaming_chat_response_handler(response, ctx):
                             {
                                 'tool_call_id': tool_call_id,
                                 'content': tool_result_content(tool_result),
+                                'timing': tool_call_timing(tool_call),
                                 **({'files': tool_result_files} if tool_result_files else {}),
                                 **({'embeds': tool_result_embeds} if tool_result_embeds else {}),
                             }
@@ -5820,6 +5837,7 @@ async def streaming_chat_response_handler(response, ctx):
                                 'status': local_output_status,
                                 **({'files': display_files} if display_files else {}),
                                 **({'embeds': result.get('embeds')} if result.get('embeds') else {}),
+                                **result.get('timing', {}),
                             }
                         )
 

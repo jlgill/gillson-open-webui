@@ -6,6 +6,13 @@
 #
 # Models are stored in the database (store_model_in_db: true) and managed
 # via the LiteLLM UI at http://localhost:4000/ui — not in this file.
+# For cost reporting, set input/output_cost_per_token per deployment (explicit
+# 0 for local models). Unpriced token-consuming calls are tagged
+# cost_status=unpriced by the Langfuse correlator without asserting a $0 cost.
+# Stored pricing for ollama/glm-5.2:cloud matches glm-5.2:cloud: USD 1.40/M
+# input, 4.40/M output, 0.26/M cached input. This is a token-based valuation,
+# not the actual Ollama subscription bill. The other unpriced cloud models
+# intentionally remain unset; both llamacpp-swap/qwen3.8-27b deployments use 0.
 #
 # Secrets are resolved via os.environ/* references (values supplied through
 # .env -> docker compose -> container environment).
@@ -37,9 +44,12 @@ litellm_settings:
   # Langfuse cost correlation — works in tandem with the OWUI in-process
   #   Langfuse filter FUNCTION (config/functions/langfuse_filter.py).
   #   The custom callback (config/litellm-callbacks.py, mounted as
-  #   /app/litellm_callbacks.py) reconstructs the same deterministic trace ID
-  #   and appends a cost-tagged "litellm_generation" observation to the trace
-  #   the filter already created.  No duplicate top-level traces.
+  #   /app/litellm_callbacks.py) reads the X-OpenWebUI-Langfuse policy header
+  #   (trace_id + parent_observation_id) and adds a cost-tagged
+  #   "generate-response" generation inside the filter's matching
+  #   "run-agent-step" span (task calls: "generate-title", ... under the root).
+  #   No duplicate top-level traces. The filter's own "record-conversation"
+  #   event (the turn as OWUI renders it) needs no gateway-side config.
   #
   #   Enablement and content capture follow the OWUI Function valves via the
   #   server-generated X-OpenWebUI-Langfuse header. With the filter enabled,
@@ -53,11 +63,11 @@ litellm_settings:
   #   Gateway-wide usage/cost remains available via the LiteLLM Admin UI
   #   (http://localhost:4000/ui) and Grafana OTEL.
   #
-  # Requires the updated OWUI backend header bridge and filter v1.3.1.
+  # Requires the OWUI backend header bridge and filter v2.x (policy header v2).
   # No manually configured tracing headers or pilot environment settings.
   success_callback: ["litellm_callbacks.owui_trace_correlator"]
   # Correlator also on failure_callback: failed LLM calls emit ERROR-level
-  # litellm_generation observations on the OWUI trace instead of vanishing.
+  # generations on the OWUI trace instead of vanishing.
   failure_callback: ["otel", "litellm_callbacks.owui_trace_correlator"]
   service_callback: ["otel"]
 

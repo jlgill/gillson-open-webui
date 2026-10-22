@@ -2,36 +2,56 @@
 config/litellm-callbacks.py
 
 LiteLLM CustomLogger: correlates each LiteLLM completion with the Langfuse trace
-that the OWUI in-process Langfuse filter function already created for that turn,
-then appends a fully-enriched generation observation to it.
+that the OWUI in-process Langfuse filter function (config/functions/langfuse_filter.py)
+opened for that turn, then appends a fully-enriched generation observation to it,
+nested under the filter's current `run-agent-step` span.
 
 How it works
 ------------
-The OWUI Langfuse filter (config/functions/langfuse_filter.py) creates a
-deterministic trace ID using:
+The OWUI filter publishes a per-request policy dict that OWUI's header bridge
+(utils/headers.py) forwards on every outgoing LiteLLM call as the
+`X-OpenWebUI-Langfuse` header (JSON):
+
+    {"v": 2, "enabled": true, "trace_id": "<32 hex>",
+     "parent_observation_id": "<16 hex>", "chat_id": ..., "message_id": ...,
+     "step_index": 2, "phase": "turn" | "background", "capture_*": bool}
+
+`trace_id` is used verbatim when present and valid; otherwise the legacy
+formula is recomputed from chat_id/message_id:
 
     trace_id = sha256(f"{chat_id}:{message_id}".encode()).digest()[:16].hex()
 
-This mirrors Langfuse.create_trace_id(seed=...) — confirmed from langfuse==4.15.6.
-This callback recomputes the same ID from OWUI's forwarded request headers and
-attaches a Langfuse "generation" observation with LiteLLM's accurate cost + usage
-PLUS the per-call input messages, completion output, tool calls, reasoning,
-gateway TTFT (completion_start_time), and model parameters.
+which mirrors Langfuse.create_trace_id(seed=...) in langfuse==4.15.6.
+`parent_observation_id` nests the generation under the filter's step (or the
+root for task calls such as title/tags/query generation).
 
-NOTE: The LiteLLM container ships langfuse v2 (2.59.7), not v4. This callback
-uses the langfuse v2 SDK API: lf.generation(trace_id=..., usage={...}).
-The langfuse v2 Usage dict supports total_cost for passing LiteLLM's cost data.
+The generation is named after the action, never the transport:
+  * `generate-response` for chat turns,
+  * `generate-title`, `generate-tags`, `generate-queries`, ... for OWUI tasks,
+    derived from the `X-OpenWebUI-Task` connection header (`{{TASK}}` template).
 
-v1.3.1 (valve-controlled tracing; retains issue #1 hardening):
-- No per-request flush(); SDK background batching with bounded queues (1024),
-  short timeouts, and an atexit shutdown flush (LiteLLM's proxy shutdown hook
-  only flushes its NATIVE langfuse logger, not custom loggers).
-- Enablement and capture follow the OWUI filter valves forwarded in the
-    server-generated X-OpenWebUI-Langfuse header; no pilot environment gates.
-- 1MB per-record cap with progressive degradation (input dropped, then output)
-  before dropping the record; drop counter surfaced via throttled detail-free log.
-- Failure events emit ERROR-level generations with generic status text when
-  capture is off (error detail is content).
+NOTE: The LiteLLM container ships langfuse v2 (2.57.x), not v4. This callback
+uses the langfuse v2 SDK API: lf.generation(trace_id=..., parent_observation_id=..., ...).
+
+v2.2.0 (honest cost):
+- `cost_status` metadata on every generation: `litellm` (priced by deployment
+  pricing or the model map), `cache_hit`, `unavailable` (LiteLLM could not cost
+  the call) or `unpriced`.
+- `unpriced` = response_cost 0 for a call that used tokens on a model with no
+  deployment pricing and no model-map entry. Such generations carry NO
+  cost_details instead of an asserted $0, so Langfuse can apply its own model
+  definitions and spend dashboards do not under-report. Fix the root cause by
+  adding input/output_cost_per_token to the LiteLLM deployment.
+
+v2.1.0 (nested per-step generations + gateway timing):
+- Policy-provided trace_id + parent_observation_id (validated hex) with the
+  sha256 fallback; task-aware generation names; step_index/phase/task metadata.
+- LiteLLM timing: native completion_start_time (Langfuse TTFT), gateway pre-call /
+  provider TTFT / overhead / retries metadata, `perf.litellm_overhead_ms` score.
+- Retains v1.3.x hardening: no per-request flush(); bounded queues (1024);
+  atexit shutdown flush; 1MB record cap with progressive degradation; ERROR
+  generations for failures with generic text when capture is off; enablement
+  and capture follow the OWUI filter valves forwarded in the header.
 
 Setup checklist
 ---------------
@@ -42,20 +62,25 @@ Setup checklist
        success_callback: ["litellm_callbacks.owui_trace_correlator"]
        failure_callback: ["litellm_callbacks.owui_trace_correlator"]
 
-3. Install the updated OWUI filter and backend header bridge. OWUI forwards
-    X-OpenWebUI-Langfuse automatically only for requests authorized by the filter.
-    No manually configured tracing headers or user-info forwarding are required.
+3. Install the OWUI filter (v2.0.0+) and keep the backend header bridge. OWUI
+   forwards X-OpenWebUI-Langfuse automatically for requests the filter traces.
 
-4. LANGFUSE_HOST / OWUI_LANGFUSE_PUBLIC_KEY / OWUI_LANGFUSE_SECRET_KEY must be set
-    in the litellm container environment (already present in docker-compose.prod.yaml).
+4. Admin -> Settings -> Connections -> LiteLLM connection -> Headers: add
+       X-OpenWebUI-Task: {{TASK}}
+   so background/in-turn task calls get task-specific generation names.
+
+5. LANGFUSE_HOST / OWUI_LANGFUSE_PUBLIC_KEY / OWUI_LANGFUSE_SECRET_KEY must be set
+   in the litellm container environment (already present in docker-compose.prod.yaml).
 
 Result in Langfuse
 ------------------
-Each chat-turn trace will contain TWO generation-level observations:
-  • llm_response        — created by the filter outlet (input/output text, masked)
-  • litellm_generation  — created by this callback (per-call input/output, tool calls,
-                          reasoning, TTFT, model params, accurate cost + token counts)
-They share the same trace_id so they appear together under one trace.
+Each chat-turn trace holds the filter's `respond-to-chat` root with one
+`run-agent-step` span per model call; this callback adds the `generate-response`
+generation (per-call input/output, tool calls, reasoning, TTFT, model params,
+accurate cost + token counts) inside the matching step, and task generations
+under the root. The filter (v2.2.0+) also records a `record-conversation` event
+under the root that replays the turn in OWUI display order; it carries no usage,
+so cost and tokens stay solely on these generations.
 """
 
 from __future__ import annotations
@@ -79,6 +104,24 @@ log.setLevel(logging.WARNING)
 # Per-record export cap; oversized records degrade progressively before dropping.
 _MAX_RECORD_BYTES = 1_048_576
 
+_HEX_TRACE_ID = re.compile(r"^[0-9a-f]{32}$")
+_HEX_OBSERVATION_ID = re.compile(r"^[0-9a-f]{16}$")
+
+# Action-oriented generation names; OWUI task names arrive via X-OpenWebUI-Task.
+_GENERATION_NAME_DEFAULT = "generate-response"
+_GENERATION_NAME_BY_TASK = {
+    "title_generation": "generate-title",
+    "tags_generation": "generate-tags",
+    "follow_up_generation": "generate-follow-ups",
+    "query_generation": "generate-queries",
+    "emoji_generation": "generate-emoji",
+    "image_prompt_generation": "generate-image-prompt",
+    "autocomplete_generation": "generate-autocomplete",
+    "function_calling": "call-functions",
+    "moa_response_generation": "generate-moa-response",
+}
+_GENERATION_NAME_TASK_FALLBACK = "run-task"
+
 
 def _debug() -> bool:
     return os.getenv("OWUI_TRACE_CORRELATOR_DEBUG", "false").lower() == "true"
@@ -87,17 +130,27 @@ def _debug() -> bool:
 # ── trace-ID formula ──────────────────────────────────────────────────────────
 
 def _trace_id(chat_id: str, message_id: Optional[str]) -> str:
-    """Reproduces Langfuse.create_trace_id(seed=…) from langfuse==4.15.6.
+    """Legacy fallback reproducing Langfuse.create_trace_id(seed=…) from langfuse==4.15.6.
 
     Source (confirmed in the pinned Open WebUI SDK):
         return sha256(seed.encode("utf-8")).digest()[:16].hex()
 
-    Seed mirrors langfuse_filter.py → Filter._trace_id_for():
+    Seed mirrors langfuse_filter.py -> Filter._trace_id_for():
         f"{chat_id}:{message_id}"  if message_id is present
         f"{chat_id}"               fallback (whole-chat trace)
+
+    Policies from filter v2.0.0+ carry the trace id explicitly; this is only used
+    when that field is absent or malformed.
     """
     seed = f"{chat_id}:{message_id}" if message_id else chat_id
     return hashlib.sha256(seed.encode("utf-8")).digest()[:16].hex()
+
+
+def _generation_name(task: Optional[str]) -> str:
+    task = (task or "").strip()
+    if not task:
+        return _GENERATION_NAME_DEFAULT
+    return _GENERATION_NAME_BY_TASK.get(task, _GENERATION_NAME_TASK_FALLBACK)
 
 
 # ── masking / truncation (ported from langfuse_filter.py) ─────────────────────
@@ -269,17 +322,79 @@ def _extract_model_parameters(kwargs: dict) -> Optional[dict]:
     return None
 
 
-def _extract_ttft_seconds(kwargs: dict) -> Optional[float]:
-    """Gateway-measured time-to-first-token from the standard logging payload."""
-    slo = kwargs.get("measured_time_to_first_token") or kwargs.get("time_to_first_token")
-    if isinstance(slo, (int, float)):
-        return round(float(slo), 4)
-    std = kwargs.get("standard_logging_object") or {}
-    if isinstance(std, dict):
-        ttft = std.get("time_to_first_token")
-        if isinstance(ttft, (int, float)):
-            return round(float(ttft), 4)
+def _epoch_seconds(value: Any) -> Optional[float]:
+    if isinstance(value, datetime):
+        return value.timestamp()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
     return None
+
+
+def _extract_completion_start(kwargs: dict) -> Optional[float]:
+    """Epoch seconds of the first streamed token as measured by LiteLLM.
+
+    LiteLLM stores it on model_call_details as `completion_start_time` (datetime) and on
+    the standard logging payload as `completionStartTime` (float); non-streaming calls
+    report end_time there, which is still the moment the response became available.
+    """
+    direct = _epoch_seconds(kwargs.get("completion_start_time"))
+    if direct is not None:
+        return direct
+    slo = kwargs.get("standard_logging_object") or {}
+    if isinstance(slo, dict):
+        return _epoch_seconds(slo.get("completionStartTime"))
+    return None
+
+
+def _extract_gateway_timing(kwargs: dict, start_time: Any, completion_start: Optional[float]) -> dict[str, Any]:
+    """Where the gateway spent time: pre-call overhead, provider hand-off, TTFT, retries.
+
+    Sources (LiteLLM model_call_details / standard_logging_object):
+      first_api_call_start_time  first provider hand-off (set once, excludes retry loops)
+      llm_api_duration_ms        provider round trip
+      hidden_params.litellm_overhead_time_ms  total - provider time (gateway overhead)
+      hidden_params.additional_headers        provider rate-limit headroom
+      litellm_params.metadata.attempted_retries / attempted_fallbacks
+      timing_*_ms                opt-in per-phase split (LITELLM_DETAILED_TIMING=true)
+    """
+    timing: dict[str, Any] = {}
+    start = _epoch_seconds(start_time)
+    handoff = _epoch_seconds(kwargs.get("first_api_call_start_time") or kwargs.get("api_call_start_time"))
+    if start is not None and handoff is not None and handoff >= start:
+        timing["gateway_precall_seconds"] = round(handoff - start, 4)
+    if start is not None and completion_start is not None and completion_start >= start:
+        timing["ttft_seconds"] = round(completion_start - start, 4)
+    if handoff is not None and completion_start is not None and completion_start >= handoff:
+        timing["provider_ttft_seconds"] = round(completion_start - handoff, 4)
+    llm_api_ms = kwargs.get("llm_api_duration_ms")
+    if isinstance(llm_api_ms, (int, float)) and not isinstance(llm_api_ms, bool):
+        timing["llm_api_duration_ms"] = round(float(llm_api_ms), 3)
+    slo = kwargs.get("standard_logging_object") or {}
+    hidden = slo.get("hidden_params") if isinstance(slo, dict) else None
+    if isinstance(hidden, dict):
+        overhead = hidden.get("litellm_overhead_time_ms")
+        if isinstance(overhead, (int, float)) and not isinstance(overhead, bool):
+            timing["litellm_overhead_ms"] = round(float(overhead), 3)
+        for key in ("_response_ms", "timing_pre_processing_ms", "timing_llm_api_ms", "timing_post_processing_ms", "callback_duration_ms"):
+            value = hidden.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                timing[key.lstrip("_")] = round(float(value), 3)
+        if hidden.get("litellm_model_name"):
+            timing["provider_model"] = str(hidden["litellm_model_name"])
+        headers = hidden.get("additional_headers")
+        if isinstance(headers, dict):
+            for key in ("x_ratelimit_remaining_requests", "x_ratelimit_remaining_tokens"):
+                if headers.get(key) is not None:
+                    timing[key.replace("x_", "")] = headers[key]
+    litellm_meta = (kwargs.get("litellm_params") or {}).get("metadata") if isinstance(kwargs.get("litellm_params"), dict) else None
+    if isinstance(litellm_meta, dict):
+        for key in ("attempted_retries", "attempted_fallbacks", "original_model_group"):
+            if litellm_meta.get(key) not in (None, "", 0):
+                timing[key] = litellm_meta[key]
+    slo_meta = slo.get("metadata") if isinstance(slo, dict) else None
+    if isinstance(slo_meta, dict) and isinstance(slo_meta.get("routing_decision"), dict):
+        timing["routing_decision"] = slo_meta["routing_decision"]
+    return timing
 
 
 def _extract_call_type(kwargs: dict) -> Optional[str]:
@@ -299,6 +414,55 @@ def _extract_stream_mode(kwargs: dict) -> Optional[bool]:
     if isinstance(litellm_params, dict):
         return bool(litellm_params.get("stream"))
     return None
+
+
+# Mirrors litellm's use_custom_pricing_for_model (deployment pricing) plus the model map.
+_PRICING_KEYS = (
+    "input_cost_per_token",
+    "output_cost_per_token",
+    "input_cost_per_second",
+    "output_cost_per_second",
+    "input_cost_per_character",
+    "output_cost_per_character",
+    "tiered_pricing",
+)
+
+
+def _has_pricing(source: Any) -> bool:
+    return isinstance(source, dict) and any(source.get(key) is not None for key in _PRICING_KEYS)
+
+
+def _cost_status(kwargs: dict, total_tokens: int) -> str:
+    """How far LiteLLM's response_cost can be trusted.
+
+    `unpriced` = 0 for a call that used tokens on a model with no deployment pricing
+    and no model-map entry: an artifact, not a free call. Reporting it as $0 would
+    hide real spend, so the generation carries no cost and Langfuse can fall back to
+    its own model definitions. A deliberate $0 price (e.g. local Ollama) stays `litellm`.
+    """
+    response_cost = kwargs.get("response_cost")
+    if kwargs.get("cache_hit") is True:
+        return "cache_hit"
+    if response_cost is None:
+        return "unavailable"
+    try:
+        if float(response_cost) > 0 or total_tokens <= 0:
+            return "litellm"
+    except (TypeError, ValueError):
+        return "unavailable"
+    params = kwargs.get("litellm_params") or {}
+    if isinstance(params, dict):
+        if _has_pricing(params):
+            return "litellm"
+        for key in ("metadata", "litellm_metadata"):
+            container = params.get(key)
+            if isinstance(container, dict) and _has_pricing(container.get("model_info")):
+                return "litellm"
+    std = kwargs.get("standard_logging_object") or {}
+    model_map = std.get("model_map_information") if isinstance(std, dict) else None
+    if isinstance(model_map, dict) and _has_pricing(model_map.get("model_map_value")):
+        return "litellm"
+    return "unpriced"
 
 
 def _extract_input_messages(kwargs: dict) -> Optional[Any]:
@@ -465,7 +629,18 @@ class OWUITraceCorrelator(CustomLogger):
             if self._lf is None:
                 return
 
-            trace_id = _trace_id(chat_id, message_id)
+            policy_trace_id = policy.get("trace_id")
+            trace_id = (
+                policy_trace_id
+                if isinstance(policy_trace_id, str) and _HEX_TRACE_ID.match(policy_trace_id)
+                else _trace_id(chat_id, message_id)
+            )
+            parent_observation_id = policy.get("parent_observation_id")
+            if not (isinstance(parent_observation_id, str) and _HEX_OBSERVATION_ID.match(parent_observation_id)):
+                parent_observation_id = None
+            task = self._header(hdrs, "X-OpenWebUI-Task")
+            if task and ("{{" in task or len(task) > 100):
+                task = None
             capture_inputs = policy.get("capture_inputs") is True
             capture_outputs = policy.get("capture_outputs") is True
             capture = capture_inputs or capture_outputs
@@ -492,13 +667,15 @@ class OWUITraceCorrelator(CustomLogger):
 
             # ── cost ───────────────────────────────────────────────────────
             cost = float(kwargs.get("response_cost") or 0)
+            cost_status = _cost_status(kwargs, int(usage.get("total") or 0))
 
             # ── per-call content (masked + truncated) ─────────────────────
             input_messages = _extract_input_messages(kwargs)
             output_text = _extract_output_text(response_obj)
             tool_calls = _extract_tool_calls(response_obj)
             reasoning = _extract_reasoning(response_obj)
-            ttft_seconds = _extract_ttft_seconds(kwargs)
+            completion_start = _extract_completion_start(kwargs)
+            gateway_timing = _extract_gateway_timing(kwargs, start_time, completion_start)
             model_parameters = _extract_model_parameters(kwargs)
             call_type = _extract_call_type(kwargs)
             stream_mode = _extract_stream_mode(kwargs)
@@ -511,8 +688,13 @@ class OWUITraceCorrelator(CustomLogger):
                 "litellm_call_id": str(kwargs.get("litellm_call_id", "")),
                 "call_type": call_type,
                 "stream": stream_mode,
-                "ttft_seconds": ttft_seconds,
                 "tool_call_count": len(tool_calls) if tool_calls else 0,
+                "task": task or None,
+                "step_index": policy.get("step_index"),
+                "phase": policy.get("phase"),
+                "policy_version": policy.get("v"),
+                "cost_status": cost_status,
+                **gateway_timing,
             }
             custom_provider = (
                 kwargs.get("litellm_params", {}).get("custom_llm_provider")
@@ -523,7 +705,8 @@ class OWUITraceCorrelator(CustomLogger):
             # ── attach generation to the filter's trace (v2 API) ──────────
             gen_kwargs: dict[str, Any] = {
                 "trace_id": trace_id,
-                "name": "litellm_generation",
+                "parent_observation_id": parent_observation_id,
+                "name": _generation_name(task),
                 "model": model,
                 "start_time": self._to_dt(start_time),
                 "end_time": self._to_dt(end_time),
@@ -532,7 +715,7 @@ class OWUITraceCorrelator(CustomLogger):
                 "level": level,
                 "status_message": _mask_string(status_message) if capture and status_message else ("LLM call failed" if level == "ERROR" else None),
             }
-            if kwargs.get("response_cost") is not None:
+            if cost_status in {"litellm", "cache_hit"}:
                 # Keep cost in the dedicated field; Langfuse v3 persists this as
                 # total_cost, whereas a generic Usage.totalCost is not surfaced
                 # by the v3 observation API.
@@ -574,12 +757,13 @@ class OWUITraceCorrelator(CustomLogger):
             if capture_outputs and output_payload:
                 gen_kwargs["output"] = _safe_data(output_payload)
 
-            # Gateway TTFT → Langfuse's native completion_start_time (renders
-            # as the TTFT bar in the generation timeline UI).
-            if ttft_seconds is not None:
+            # LiteLLM's first-token instant -> Langfuse's native TTFT (timeToFirstToken,
+            # chartable per model in the latency dashboard).
+            if completion_start is not None:
                 start_dt = self._to_dt(start_time)
-                if start_dt is not None:
-                    gen_kwargs["completion_start_time"] = start_dt + timedelta(seconds=ttft_seconds)
+                completion_dt = datetime.fromtimestamp(completion_start, tz=timezone.utc)
+                if start_dt is None or completion_dt >= start_dt.astimezone(timezone.utc):
+                    gen_kwargs["completion_start_time"] = completion_dt
 
             if capture and model_parameters:
                 gen_kwargs["model_parameters"] = _safe_data(model_parameters)
@@ -590,28 +774,45 @@ class OWUITraceCorrelator(CustomLogger):
                 if gen_kwargs.get("input") is not None:
                     gen_kwargs["input"] = None
                     if len(json.dumps(gen_kwargs, default=str).encode()) <= _MAX_RECORD_BYTES:
-                        self._post_generation(gen_kwargs)
+                        self._post_generation(gen_kwargs, gateway_timing)
                         return
                 if gen_kwargs.get("output") is not None:
                     gen_kwargs["output"] = None
                     if len(json.dumps(gen_kwargs, default=str).encode()) <= _MAX_RECORD_BYTES:
-                        self._post_generation(gen_kwargs)
+                        self._post_generation(gen_kwargs, gateway_timing)
                         return
                 self.dropped += 1
                 self._throttled_log("record exceeds size cap after content removal")
                 return
-            self._post_generation(gen_kwargs)
+            self._post_generation(gen_kwargs, gateway_timing)
 
         except Exception as exc:
             self.failures += 1
             self._throttled_log(f"_emit_generation failed: {exc}")
 
-    def _post_generation(self, gen_kwargs: dict) -> None:
-        self._lf.generation(**gen_kwargs)
+    def _post_generation(self, gen_kwargs: dict, gateway_timing: Optional[dict] = None) -> None:
+        self._lf.generation(**{key: value for key, value in gen_kwargs.items() if value is not None})
+        # Gateway overhead as a numeric score: dashboards can average it per model;
+        # metadata is filter-only.
+        overhead = (gateway_timing or {}).get("litellm_overhead_ms")
+        if gen_kwargs.get("id") and isinstance(overhead, (int, float)):
+            try:
+                self._lf.score(
+                    trace_id=gen_kwargs["trace_id"],
+                    observation_id=gen_kwargs["id"],
+                    name="perf.litellm_overhead_ms",
+                    value=float(overhead),
+                    data_type="NUMERIC",
+                    comment="LiteLLM total minus provider time",
+                )
+            except Exception as exc:
+                self._throttled_log(f"overhead score failed: {exc}")
         if _debug():
             log.info(
-                "OWUITraceCorrelator: generation logged — trace_id=%s",
+                "OWUITraceCorrelator: generation logged — trace_id=%s parent=%s name=%s",
                 gen_kwargs.get("trace_id"),
+                gen_kwargs.get("parent_observation_id"),
+                gen_kwargs.get("name"),
             )
 
     # ── event handlers ─────────────────────────────────────────────────────────
@@ -656,6 +857,6 @@ class OWUITraceCorrelator(CustomLogger):
         )
 
 
-# Module-level singleton — referenced by config/litellm-tracing.yaml as:
-#   callbacks: ["litellm_callbacks.owui_trace_correlator"]
+# Module-level singleton — referenced by config/litellm-config.yaml as:
+#   success_callback / failure_callback: ["litellm_callbacks.owui_trace_correlator"]
 owui_trace_correlator = OWUITraceCorrelator()
