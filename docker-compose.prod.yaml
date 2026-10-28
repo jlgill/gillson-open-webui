@@ -720,7 +720,7 @@ services:
       - owui-network
 
   cloudflared:
-    image: cloudflare/cloudflared:2026.9.1
+    image: cloudflare/cloudflared:2026.10.4
     container_name: owui-cloudflared
     restart: unless-stopped
     command: tunnel --protocol http2 run  # http2 required due to QUIC/UDP buffer issues in Docker
