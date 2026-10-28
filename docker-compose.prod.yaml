@@ -456,7 +456,7 @@ services:
       - owui-network
 
   open-webui:
-    image: ghcr.io/jlgill/gillson-open-webui:90ad3d0
+    image: ghcr.io/jlgill/gillson-open-webui:31c1d20
     container_name: owui-app
     entrypoint: ["/bin/sh", "/app/owui-oauth-entrypoint.sh"]
     command: ["bash", "start.sh"]
@@ -487,6 +487,7 @@ services:
       - WEBUI_SESSION_COOKIE_SECURE=true
 
       - WEBUI_URL=https://owui.gillson.us
+      - CORS_ALLOW_ORIGIN=https://owui.gillson.us
       - ENABLE_OAUTH=true
       - ENABLE_OAUTH_PERSISTENT_CONFIG=false
       - ENABLE_OAUTH_SIGNUP=false
@@ -773,4 +774,3 @@ networks:
   outline-net:
     name: outline_default
     external: true
-
