@@ -7,7 +7,7 @@ import inspect
 import logging
 import os
 import re
-from functools import cache, partial, update_wrapper
+from functools import cache, partial, update_wrapper, wraps
 from typing import (
     Any,
     Awaitable,
@@ -52,10 +52,12 @@ from open_webui.tools.builtin import (
     create_automation,
     create_calendar_event,
     create_tasks,
+    create_tool,
     delegate_task,
     delete_automation,
     delete_calendar_event,
     delete_memory,
+    display_file,
     edit_image,
     execute_code,
     fetch_url,
@@ -255,9 +257,13 @@ async def connect_mcp_server(
         tool_specs = await client.list_tool_specs()
         if function_name_filter_list:
             tool_specs = [spec for spec in tool_specs if is_string_allowed(spec['name'], function_name_filter_list)]
+            client.tool_definitions = {
+                name: tool
+                for name, tool in client.tool_definitions.items()
+                if is_string_allowed(name, function_name_filter_list)
+            }
         return client, tool_specs
     except BaseException:
-        # MCP sessions must be closed in the same task that opened them.
         await client.disconnect()
         raise
 
@@ -334,12 +340,26 @@ async def get_updated_tool_function(function: Callable, extra_params: dict):
     __extra_params__ = getattr(function, '__extra_params__', None)
 
     if __function__ is not None and __extra_params__ is not None:
-        return await get_async_tool_function_and_apply_extra_params(
+        updated = await get_async_tool_function_and_apply_extra_params(
             __function__,
             {**__extra_params__, **extra_params},
         )
+        tool_id = getattr(function, '__tool_id__', None)
+        return guard_tool_enabled(tool_id, updated) if tool_id is not None else updated
 
     return function
+
+
+def guard_tool_enabled(tool_id: str, function: Callable) -> Callable:
+    @wraps(function)
+    async def guarded(*args, **kwargs):
+        # Resolve again at invocation: a chat may have prepared this callable before a toggle.
+        if not await Tools.is_tool_active(tool_id):
+            raise HTTPException(status_code=403, detail='Tool is disabled or no longer available')
+        return await function(*args, **kwargs)
+
+    guarded.__tool_id__ = tool_id
+    return guarded
 
 
 async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extra_params: dict) -> dict[str, dict]:
@@ -368,6 +388,8 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
     for tool_id in tool_ids:
         tool = tool_models.get(tool_id)
         if tool:
+            if not tool.is_active:
+                continue
             # Check access control for local tools
             if (
                 not (user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL)
@@ -426,6 +448,7 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
                         '__user__': __user__,
                     },
                 )
+                callable = guard_tool_enabled(tool_id, callable)
 
                 # TODO: Support Pydantic models as parameters
                 if callable.__doc__ and callable.__doc__.strip() != '':
@@ -716,7 +739,7 @@ async def get_builtin_tools(
         and has_chat_files
         and await has_user_chat_permission('file_upload')
     ):
-        builtin_functions.extend([list_chat_files, query_chat_files, grep_chat_files, view_file])
+        builtin_functions.extend([list_chat_files, query_chat_files, grep_chat_files, view_file, display_file])
 
     # Knowledge base tools - conditional injection based on model knowledge
     # If model has attached knowledge (any type), only provide query_knowledge_files
@@ -728,6 +751,7 @@ async def get_builtin_tools(
         if ENABLE_KB_EXEC:
             builtin_functions.append(kb_exec)
             builtin_functions.append(query_knowledge_files)
+            builtin_functions.append(display_file)
             # Notes attached to the model need view_note since kb_exec is file-only
             if model_knowledge:
                 knowledge_types = {item.get('type') for item in model_knowledge}
@@ -743,7 +767,7 @@ async def get_builtin_tools(
 
             knowledge_types = {item.get('type') for item in model_knowledge}
             if 'file' in knowledge_types or 'collection' in knowledge_types:
-                builtin_functions.extend([view_file, view_knowledge_file])
+                builtin_functions.extend([view_file, view_knowledge_file, display_file])
             if 'note' in knowledge_types:
                 builtin_functions.append(view_note)
         else:
@@ -756,6 +780,7 @@ async def get_builtin_tools(
                     search_knowledge_files,
                     query_knowledge_files,
                     view_knowledge_file,
+                    display_file,
                 ]
             )
 
@@ -863,6 +888,12 @@ async def get_builtin_tools(
         ):
             builtin_functions.append(create_skill)
 
+    if ENABLE_TOOLS and is_builtin_tool_enabled('tools'):
+        if user.get('role') == 'admin' or await has_permission(
+            user.get('id', ''), 'workspace.tools', await Config.get('user.permissions')
+        ):
+            builtin_functions.append(create_tool)
+
     # Task management - break down complex work into trackable steps
     # Task state is stored on the chats row; local/channel IDs do not have one.
     if is_builtin_tool_enabled('tasks') and is_saved_chat_id(metadata.get('chat_id')):
@@ -914,11 +945,22 @@ async def get_builtin_tools(
         )
 
         spec = get_builtin_tool_spec(func)
-        if func.__name__ == 'delegate_task' and not config.get('subagents.background_enabled'):
+        if func.__name__ == 'delegate_task':
+            from open_webui.utils.subagents import get_subagent_models
+
             parameters = spec.get('parameters', {})
-            parameters.get('properties', {}).pop('background', None)
-            if isinstance(parameters.get('required'), list):
-                parameters['required'] = [name for name in parameters['required'] if name != 'background']
+            properties = parameters.get('properties', {})
+            if not config.get('subagents.background_enabled'):
+                properties.pop('background', None)
+                if isinstance(parameters.get('required'), list):
+                    parameters['required'] = [name for name in parameters['required'] if name != 'background']
+
+            subagent_models = await get_subagent_models(request, UserModel(**user), model) if user else []
+            if subagent_models:
+                properties['model_id']['enum'] = [model['id'] for model in subagent_models]
+                spec['description'] += f' Available models: {JSONCodec.dumps(subagent_models)}'
+            else:
+                properties.pop('model_id', None)
 
         tools_dict[func.__name__] = {
             'tool_id': f'builtin:{func.__name__}',
@@ -1074,32 +1116,6 @@ def clean_openai_tool_schema(spec: dict) -> dict:
         clean_properties(cleaned_spec['parameters'])
 
     return cleaned_spec
-
-
-def add_terminal_display_file_inline_param(spec: dict) -> dict:
-    spec = copy.deepcopy(spec)
-    if spec.get('name') != 'display_file':
-        return spec
-
-    spec['description'] = (
-        f'{spec.get("description", "")} '
-        'Set inline=true when the file should be shown inline in the chat message instead of opening the file viewer. '
-        'Set page for PDF, DOCX, and PPTX files when you want the preview to open at a specific 1-based page or slide. '
-        'After display_file succeeds, do not display the same file again or emit Markdown for it.'
-    ).strip()
-    parameters = spec.setdefault('parameters', {'type': 'object', 'properties': {}, 'required': []})
-    parameters.setdefault('type', 'object')
-    properties = parameters.setdefault('properties', {})
-    properties['inline'] = {
-        'type': 'boolean',
-        'description': 'Show the file inline in the chat message instead of opening the file viewer.',
-    }
-    properties['page'] = {
-        'type': 'integer',
-        'minimum': 1,
-        'description': 'For PDF, DOCX, and PPTX files, open the preview at this 1-based page or slide number.',
-    }
-    return spec
 
 
 @cache
@@ -1588,7 +1604,9 @@ async def get_terminal_tools(
     tools_dict = {}
     for spec in specs:
         function_name = spec['name']
-        tool_spec = clean_openai_tool_schema(add_terminal_display_file_inline_param(spec))
+        tool_spec = clean_openai_tool_schema(
+            get_builtin_tool_spec(display_file) if function_name == 'display_file' else spec
+        )
 
         if function_name == 'run_command' and terminal_cwd:
             tool_spec['description'] = (
@@ -1749,9 +1767,7 @@ async def get_tool_servers_data(servers: list[dict[str, Any]]) -> list[dict[str,
         response = {
             'openapi': response,
             'info': response.get('info', {}),
-            'specs': [
-                add_terminal_display_file_inline_param(spec) for spec in convert_openapi_to_tool_payload(response)
-            ],
+            'specs': convert_openapi_to_tool_payload(response),
         }
 
         openapi_data = response.get('openapi', {})

@@ -19,9 +19,7 @@ from langchain_classic.retrievers import (
 )
 from langchain_core.documents import Document
 from open_webui.config import (
-    RAG_EMBEDDING_CONTENT_PREFIX,
     RAG_EMBEDDING_PREFIX_FIELD_NAME,
-    RAG_EMBEDDING_QUERY_PREFIX,
     VECTOR_DB,
 )
 from open_webui.constants import ERROR_MESSAGES
@@ -213,6 +211,7 @@ async def get_content_from_url(request, url: str, *, config: dict | None = None)
             'rag.mineru_params',
             'rag.mistral_ocr_api_base_url',
             'rag.mistral_ocr_api_key',
+            'rag.mistral_ocr_params',
             'rag.mistral_ocr_use_base64',
             'rag.paddleocr_vl_base_url',
             'rag.paddleocr_vl_token',
@@ -244,12 +243,7 @@ def _get_content_from_url_sync(request, url: str, config: dict):
     # Validate URL before making any request (blocks private IPs, non-HTTP, filter list)
     validate_url(url)
 
-    # YouTube URLs (including youtu.be short links) should go straight to
-    # YoutubeLoader, which uses youtube-transcript-api and never needs the
-    # HTTP response body.  Probing the URL first is harmful for short URLs:
-    # youtu.be returns a 303 redirect with Content-Type: application/binary
-    # when allow_redirects=False, causing the binary-content path to run
-    # and produce empty docs → HTTP 400.
+    # Send YouTube URLs directly to YoutubeLoader; probing youtu.be can misclassify its 303 as binary.
     if is_youtube_url(url):
         loader = get_loader(request, url, config)
         docs = loader.load()
@@ -321,7 +315,7 @@ class VectorSearchRetriever(BaseRetriever):
         *,
         run_manager: CallbackManagerForRetrieverRun,
     ) -> list[Document]:
-        embedding = await self.embedding_function(query, RAG_EMBEDDING_QUERY_PREFIX)
+        embedding = await self.embedding_function(query, await Config.get('rag.embedding_query_prefix'))
         result = await ASYNC_VECTOR_DB_CLIENT.search(
             collection_name=self.collection_name,
             vectors=[embedding],
@@ -433,7 +427,7 @@ async def query_doc_with_native_hybrid_search(
 
         query_vectors = []
         if hybrid_bm25_weight < 1:
-            query_vectors = [await embedding_function(query, RAG_EMBEDDING_QUERY_PREFIX)]
+            query_vectors = [await embedding_function(query, await Config.get('rag.embedding_query_prefix'))]
 
         result = await ASYNC_VECTOR_DB_CLIENT.hybrid_search(
             collection_name=collection_name,
@@ -696,6 +690,7 @@ async def query_collection(
 ) -> dict:
     config = await Config.get_many(
         'rag.enable_hybrid_search',
+        'rag.embedding_query_prefix',
         'rag.top_k_reranker',
         'rag.relevance_threshold',
         'rag.hybrid_bm25_weight',
@@ -749,7 +744,7 @@ async def query_collection(
         return {'distances': [[]], 'documents': [[]], 'metadatas': [[]]}
 
     # Generate all query embeddings (in one call)
-    query_embeddings = await embedding_function(queries, prefix=RAG_EMBEDDING_QUERY_PREFIX)
+    query_embeddings = await embedding_function(queries, prefix=config['rag.embedding_query_prefix'])
     log.debug('query_collection: processing %s queries across %s collections', len(queries), len(collection_names))
 
     task_results = await asyncio.gather(
@@ -814,11 +809,7 @@ async def query_collection_with_hybrid_search(
         if native_task_results and all(result is not None for result in native_task_results):
             return merge_and_sort_query_results(native_task_results, k=k)
 
-    # Fetch every collection's contents once up front so the
-    # per-query/per-document loop below can reuse them. Each fetch
-    # offloads to a worker thread, so run them concurrently with
-    # `asyncio.gather` instead of awaiting them serially — otherwise
-    # latency scales linearly with `len(collection_names)`.
+    # Fetch collections concurrently once, then reuse the results across queries and documents.
     log.debug(
         'query_collection_with_hybrid_search: prefetching %d collections',
         len(collection_names),
@@ -1371,8 +1362,15 @@ async def filter_accessible_collections(
 
 
 def filter_source_metadata(metadata: dict) -> dict:
-    """Keep only the chunk metadata keys the operator allowed the model to see."""
-    return {key: metadata[key] for key in RAG_SOURCE_METADATA_KEYS if metadata.get(key) is not None}
+    """Keep allowed metadata; expose uploaded-file pages as 1-based for the model."""
+    result = {key: metadata[key] for key in RAG_SOURCE_METADATA_KEYS if metadata.get(key) is not None}
+    if metadata.get('file_id') and not metadata.get('external'):
+        page = result.get('page')
+        if type(page) is float and page.is_integer():
+            page = int(page)
+        if type(page) is int and page >= 0:
+            result['page'] = page + 1
+    return result
 
 
 async def get_sources_from_items(
@@ -1462,8 +1460,20 @@ async def get_sources_from_items(
             ):
                 # User has access to the note
                 query_result = {
-                    'documents': [[note.data.get('content', {}).get('md', '')]],
-                    'metadatas': [[{'file_id': note.id, 'name': note.title}]],
+                    'documents': [[page['content'].get('md', '') for page in note.data['pages']]],
+                    'metadatas': [
+                        [
+                            {
+                                'file_id': note.id,
+                                'note_id': note.id,
+                                'page_id': page['id'],
+                                'parent_id': page.get('parent_id'),
+                                'name': f'{note.title} / {page["title"]}',
+                                'source': f'/notes/{note.id}?page={page["id"]}',
+                            }
+                            for page in note.data['pages']
+                        ]
+                    ],
                 }
 
         elif item.get('type') == 'chat':
@@ -1851,9 +1861,11 @@ class RerankCompressor(BaseDocumentCompressor):
         if reranking:
             scores = await asyncio.to_thread(self.reranking_function, query, documents)
         else:
-            query_embedding = await self.embedding_function(query, RAG_EMBEDDING_QUERY_PREFIX)
+            query_embedding = await self.embedding_function(query, await Config.get('rag.embedding_query_prefix'))
             doc_texts = [doc.page_content for doc in documents]
-            document_embedding = await self.embedding_function(doc_texts, RAG_EMBEDDING_CONTENT_PREFIX)
+            document_embedding = await self.embedding_function(
+                doc_texts, await Config.get('rag.embedding_content_prefix')
+            )
             scores = cosine_similarity(query_embedding, document_embedding)
 
         if scores is not None:

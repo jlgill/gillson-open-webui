@@ -24,10 +24,10 @@
 		? 'md:max-w-[calc(100%-var(--sidebar-width))]'
 		: ''} max-w-full"
 >
-	<nav class="   px-2.5 pt-1.5 backdrop-blur-xl w-full drag-region">
+	<nav class="px-1.5 pt-1.5 md:px-2.5 backdrop-blur-xl w-full drag-region">
 		<div class=" flex items-center">
 			{#if $mobile}
-				<div class="{$showSidebar ? 'md:hidden' : ''} flex flex-none items-center self-end mt-1.5">
+				<div class="{$showSidebar ? 'md:hidden' : ''} flex flex-none items-center self-start">
 					<Tooltip
 						content={$showSidebar ? $i18n.t('Close Sidebar') : $i18n.t('Open Sidebar')}
 						interactive={true}
@@ -50,7 +50,7 @@
 
 			<div class=" flex w-full">
 				<div
-					class="flex gap-0.5 md:gap-1 scrollbar-none overflow-x-auto w-fit text-center text-sm font-normal rounded-full bg-transparent pt-1"
+					class="flex gap-0.5 md:gap-1 scrollbar-none overflow-x-auto w-fit text-center text-sm font-normal bg-transparent pt-1"
 				>
 					<a
 						class="min-w-fit p-1.5 {$page.url.pathname.includes('/home/notes')
