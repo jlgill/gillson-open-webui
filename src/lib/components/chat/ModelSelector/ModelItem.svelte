@@ -1,4 +1,6 @@
 <script lang="ts">
+	import type { CommentsRequest } from '$lib/components/comments/CommentsPanel.svelte';
+	export let onComment: (request: CommentsRequest) => void;
 	import { marked } from 'marked';
 
 	import { getContext, tick } from 'svelte';
@@ -75,6 +77,9 @@
 		: ''}"
 	data-arrow-selected={index === selectedModelIdx}
 	data-value={item.value}
+	on:focus={() => {
+		selectedModelIdx = index;
+	}}
 	on:click={() => {
 		onClick();
 	}}
@@ -315,6 +320,7 @@
 
 		{#if !selectionOnly}
 			<ModelItemMenu
+				{onComment}
 				bind:show={showMenu}
 				model={item.model}
 				{pinModelHandler}

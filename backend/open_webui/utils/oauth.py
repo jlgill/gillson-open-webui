@@ -63,6 +63,7 @@ from open_webui.config import (
     OAUTH_UPDATE_PICTURE_ON_LOGIN,
     OAUTH_USERNAME_CLAIM,
     WEBHOOK_URL,
+    load_oauth_providers,
 )
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import (
@@ -83,7 +84,7 @@ from open_webui.models.config import Config
 from open_webui.models.groups import GroupForm, GroupModel, Groups, GroupUpdateForm
 from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.models.users import Users
-from open_webui.retrieval.web.utils import get_ssrf_safe_session, validate_url
+from open_webui.retrieval.web.utils import assert_identity_encoding, get_ssrf_safe_session, validate_url
 from open_webui.utils.auth import (
     get_optional_verified_user_from_request,
     get_password_hash,
@@ -1382,12 +1383,21 @@ class OAuthManager:
         self._clients = {}
         self._refresh_locks: dict[str, asyncio.Lock] = {}
 
-        for name, provider_config in OAUTH_PROVIDERS.items():
+    async def initialize(self):
+        # Provider connections are fixed for this worker's lifetime.
+        await load_oauth_providers()
+
+        for name, provider_config in list(OAUTH_PROVIDERS.items()):
             if 'register' not in provider_config:
                 log.error(f'OAuth provider {name} missing register function')
                 continue
 
-            client = provider_config['register'](self.oauth)
+            try:
+                client = provider_config['register'](self.oauth)
+            except (ValueError, TypeError) as e:
+                log.error('Error registering OAuth provider %s: %s', name, e)
+                OAUTH_PROVIDERS.pop(name)
+                continue
             self._clients[name] = client
 
     def get_client(self, provider_name):
@@ -1878,20 +1888,19 @@ class OAuthManager:
         try:
             await asyncio.to_thread(validate_url, picture_url)
 
-            get_kwargs = {}
+            headers = {'Accept-Encoding': 'identity'}
             if access_token:
-                get_kwargs['headers'] = {
-                    'Authorization': f'Bearer {access_token}',
-                }
+                headers['Authorization'] = f'Bearer {access_token}'
             # get_ssrf_safe_session pins the connect-time IP (defeats DNS rebinding); allow_redirects=False keeps validate_url's vet authoritative.
             async with get_ssrf_safe_session() as session:
                 async with session.get(
                     picture_url,
-                    **get_kwargs,
+                    headers=headers,
                     ssl=AIOHTTP_CLIENT_SESSION_SSL,
                     allow_redirects=AIOHTTP_CLIENT_ALLOW_REDIRECTS,
                 ) as resp:
                     if resp.ok:
+                        assert_identity_encoding(resp.headers.getall('Content-Encoding', ()))
                         upstream_mime = (resp.headers.get('Content-Type', '') or '').split(';', 1)[0].strip().lower()
                         picture = await resp.read()
                         base64_encoded_picture = base64.b64encode(picture).decode('utf-8')

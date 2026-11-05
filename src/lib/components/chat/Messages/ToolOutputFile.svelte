@@ -10,11 +10,12 @@
 	import {
 		settings,
 		selectedTerminalId,
-		showControls,
+		showTabs,
 		showFileNavPath,
 		terminalServers
 	} from '$lib/stores';
 	import { downloadFileBlob, downloadFilePreview, readFile } from '$lib/apis/terminal';
+	import { getFileContentById } from '$lib/apis/files';
 	import FilePreview from '$lib/components/chat/FileNav/FilePreview.svelte';
 	import Icon from '$lib/components/chat/FileNav/Icon.svelte';
 	import { fileIconName } from '$lib/components/chat/FileNav/fileIcon';
@@ -36,6 +37,7 @@
 	let fileAudioUrl: string | null = null;
 	let filePdfData: ArrayBuffer | null = null;
 	let fileSqliteData: ArrayBuffer | null = null;
+	let fileModelData: ArrayBuffer | null = null;
 	let fileDocxData: ArrayBuffer | null = null;
 	let fileContent: string | null = null;
 	let fileOfficeHtml: string | null = null;
@@ -51,13 +53,18 @@
 	const SQLITE_EXTS = new Set(['db', 'sqlite', 'sqlite3', 'db3']);
 	const OFFICE_EXTS = new Set(['docx', 'xlsx', 'xls', 'pptx']);
 
-	$: path = String(item?.full_path || item?.path || '');
+	$: fileId =
+		item?.source === 'open_webui'
+			? (String(item.path ?? '').match(/^\/api\/v1\/files\/([^/]+)\/content$/)?.[1] ?? '')
+			: '';
+	// Content URLs have no extension; use the filename to select the preview.
+	$: path = String(fileId ? item.name : item?.full_path || item?.path || '');
 	$: name = String(item?.name || path.split('/').filter(Boolean).at(-1) || 'file');
 	$: targetPage = normalizeDocumentTargetPage(item?.page);
 	$: selector = item?.terminal_selector;
 	$: terminal = resolveTerminal();
-	$: unavailable = !terminal;
-	$: previewKey = terminal ? `${terminal.url}|${terminal.key}|${path}|${chatId}` : '';
+	$: unavailable = !terminal && !fileId;
+	$: previewKey = fileId || (terminal ? `${terminal.url}|${terminal.key}|${path}|${chatId}` : '');
 	$: isPerChatTerminal =
 		($terminalServers ?? []).find((server: any) => server.id === selector)?.contexts?.chat
 			?.context_id === 'chat_id';
@@ -69,12 +76,13 @@
 		? 'h-[22rem]'
 		: isPdf(path) ||
 			  isOffice(path) ||
+			  ['glb', 'gltf', 'stl', 'obj', 'ply'].includes(getExt(path)) ||
 			  getExt(path) === 'html' ||
 			  getExt(path) === 'htm' ||
 			  getExt(path) === 'svg'
 			? 'h-96'
 			: 'h-72';
-	$: if (expanded && terminal && path && previewKey !== loadedKey && !loading) {
+	$: if (expanded && !unavailable && path && previewKey !== loadedKey && !loading) {
 		void loadPreview(previewKey);
 	}
 
@@ -114,6 +122,7 @@
 		fileAudioUrl = null;
 		filePdfData = null;
 		fileSqliteData = null;
+		fileModelData = null;
 		fileDocxData = null;
 		fileContent = null;
 		fileOfficeHtml = null;
@@ -125,6 +134,12 @@
 	}
 
 	async function blobForPreview() {
+		if (fileId) {
+			const data = await getFileContentById(fileId).catch(() => null);
+			return data
+				? { blob: new Blob([data], { type: item?.content_type ?? '' }), filename: name }
+				: null;
+		}
 		if (!terminal) return null;
 		return downloadFileBlob(terminal.url, terminal.key, path, chatId || undefined);
 	}
@@ -153,6 +168,10 @@
 				if (isImage(path)) fileImageUrl = url;
 				else if (isVideo(path)) fileVideoUrl = url;
 				else fileAudioUrl = url;
+			} else if (['glb', 'gltf', 'stl', 'obj', 'ply'].includes(getExt(path))) {
+				const result = await blobForPreview();
+				if (!result) throw new Error(t('Preview failed'));
+				fileModelData = await result.blob.arrayBuffer();
 			} else if (isPdf(path) || isSqlite(path) || isOffice(path)) {
 				const ext = getExt(path);
 
@@ -167,12 +186,9 @@
 					const arrayBuffer = await result.blob.arrayBuffer();
 					fileSqliteData = arrayBuffer;
 				} else if (ext === 'docx') {
-					const preview = await downloadFilePreview(
-						terminal.url,
-						terminal.key,
-						path,
-						chatId || undefined
-					);
+					const preview = terminal
+						? await downloadFilePreview(terminal.url, terminal.key, path, chatId || undefined)
+						: null;
 					if (preview) {
 						filePdfData = await preview.blob.arrayBuffer();
 					} else {
@@ -191,12 +207,9 @@
 						await loadExcelSheet(excelSheetNames[0]);
 					}
 				} else if (ext === 'pptx') {
-					const preview = await downloadFilePreview(
-						terminal.url,
-						terminal.key,
-						path,
-						chatId || undefined
-					);
+					const preview = terminal
+						? await downloadFilePreview(terminal.url, terminal.key, path, chatId || undefined)
+						: null;
 					if (preview) {
 						filePdfData = await preview.blob.arrayBuffer();
 					} else {
@@ -208,6 +221,10 @@
 						fileOfficeSlides = resultImages.images;
 					}
 				}
+			} else if (fileId) {
+				const result = await blobForPreview();
+				if (!result) throw new Error(t('Preview failed'));
+				fileContent = await result.blob.text();
 			} else if (terminal) {
 				fileContent = await readFile(terminal.url, terminal.key, path, chatId || undefined);
 			}
@@ -220,13 +237,13 @@
 
 	function openInFiles() {
 		if (unavailable || !path) return;
-		showControls.set(true);
+		showTabs.set(true);
 		showFileNavPath.set(targetPage ? { path, page: targetPage } : path);
 	}
 
 	async function downloadFile() {
-		if (!terminal || !path) return;
-		const result = await downloadFileBlob(terminal.url, terminal.key, path, chatId || undefined);
+		if (unavailable || !path) return;
+		const result = await blobForPreview();
 		if (!result) {
 			toast.error(t('Download failed'));
 			return;
@@ -274,15 +291,17 @@
 		>
 			<Icon name="download" size={13} />
 		</button>
-		<button
-			type="button"
-			class="mr-1 flex size-6 shrink-0 items-center justify-center rounded text-gray-400 transition-colors hover:text-gray-700 disabled:opacity-40 disabled:hover:text-gray-400 dark:text-gray-500 dark:hover:text-gray-200 dark:disabled:hover:text-gray-500"
-			disabled={unavailable}
-			on:click|stopPropagation={openInFiles}
-			aria-label={t('Open')}
-		>
-			<Icon name="external-link" size={13} />
-		</button>
+		{#if !fileId}
+			<button
+				type="button"
+				class="mr-1 flex size-6 shrink-0 items-center justify-center rounded text-gray-400 transition-colors hover:text-gray-700 disabled:opacity-40 disabled:hover:text-gray-400 dark:text-gray-500 dark:hover:text-gray-200 dark:disabled:hover:text-gray-500"
+				disabled={unavailable}
+				on:click|stopPropagation={openInFiles}
+				aria-label={t('Open')}
+			>
+				<Icon name="external-link" size={13} />
+			</button>
+		{/if}
 	</div>
 
 	{#if expanded}
@@ -304,9 +323,11 @@
 					{fileAudioUrl}
 					{filePdfData}
 					{fileSqliteData}
+					{fileModelData}
 					{fileDocxData}
 					{fileContent}
-					baseUrl={previewBaseUrl}
+					baseUrl={fileId ? '' : previewBaseUrl}
+					{chatId}
 					apiKey={terminal?.key ?? ''}
 					{fileOfficeHtml}
 					{fileOfficeSlides}
@@ -317,7 +338,7 @@
 					onSheetChange={loadExcelSheet}
 					readOnly={true}
 				/>
-				{#if !loading && fileImageUrl === null && fileVideoUrl === null && fileAudioUrl === null && filePdfData === null && fileSqliteData === null && fileDocxData === null && fileContent === null && fileOfficeHtml === null && fileOfficeSlides === null}
+				{#if !loading && fileImageUrl === null && fileVideoUrl === null && fileAudioUrl === null && filePdfData === null && fileSqliteData === null && fileModelData === null && fileDocxData === null && fileContent === null && fileOfficeHtml === null && fileOfficeSlides === null}
 					<div
 						class="flex h-full items-center justify-center px-3 text-xs text-gray-500 dark:text-gray-400"
 					>

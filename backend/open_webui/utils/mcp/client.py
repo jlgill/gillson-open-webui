@@ -1,13 +1,14 @@
 import asyncio
+import base64
 import logging
 import math
-from contextlib import AsyncExitStack
 from typing import Optional
 from urllib.parse import urlsplit
 
 import httpx2
 from jsonschema import Draft202012Validator, FormatChecker
 from mcp import Client
+from mcp.client import advertise
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import ElicitRequestFormParams, ElicitResult
 from open_webui.env import (
@@ -16,6 +17,14 @@ from open_webui.env import (
     MCP_INITIALIZE_TIMEOUT,
 )
 from open_webui.utils.json_codec import JSONCodec
+from open_webui.utils.mcp.apps import (
+    APP_MIME_TYPE,
+    MAX_APP_BYTES,
+    MCPAppResult,
+    app_binding,
+    ui_metadata,
+    ui_resource_uri,
+)
 from referencing import Registry
 
 log = logging.getLogger(__name__)
@@ -67,10 +76,11 @@ class OAuthTokenAuth(httpx2.Auth):
 class MCPClient:
     def __init__(self, event_caller=None, server_name=''):
         self.client: Optional[Client] = None
-        self.exit_stack = None
+        self.session_task: Optional[asyncio.Task] = None
         self.event_caller = event_caller
         self.server_name = server_name
         self.instructions: Optional[str] = None
+        self.tool_definitions: dict[str, dict] = {}
 
     async def elicit(self, context, params):
         try:
@@ -108,28 +118,45 @@ class MCPClient:
             return ElicitResult(action='cancel')
 
     async def connect(self, url: str, headers: Optional[dict] = None, auth: Optional[httpx2.Auth] = None):
-        async with AsyncExitStack() as exit_stack:
-            try:
-                http_client = await exit_stack.enter_async_context(create_httpx_client(headers=headers, auth=auth))
+        # A failed request makes the SDK cancel the task that opened the session, so it gets its own task.
+        connected = asyncio.get_running_loop().create_future()
+        self.session_task = asyncio.create_task(self.run_session(url, headers, auth, connected))
+        try:
+            await connected
+        except BaseException:
+            await self.disconnect()
+            raise
 
+    async def run_session(
+        self, url: str, headers: Optional[dict], auth: Optional[httpx2.Auth], connected: asyncio.Future
+    ) -> None:
+        try:
+            async with create_httpx_client(headers=headers, auth=auth) as http_client:
                 # mode='auto' (the default) probes server/discover for the stateless
                 # 2026-07-28 protocol and falls back to the initialize handshake on
                 # legacy servers. The read timeout bounds that handshake and every
                 # later request that does not set its own; the SDK caps the probe itself.
-                self.client = await exit_stack.enter_async_context(
-                    Client(
-                        streamable_http_client(url, http_client=http_client),
-                        read_timeout_seconds=MCP_INITIALIZE_TIMEOUT,
-                        elicitation_callback=self.elicit if self.event_caller else None,
-                    )
-                )
-                self.instructions = self.client.instructions
-                self.exit_stack = exit_stack.pop_all()
-            except Exception as e:
-                await self.disconnect()
-                raise e
+                async with Client(
+                    streamable_http_client(url, http_client=http_client),
+                    extensions=[advertise('io.modelcontextprotocol/ui', {'mimeTypes': ['text/html;profile=mcp-app']})],
+                    read_timeout_seconds=MCP_INITIALIZE_TIMEOUT,
+                    elicitation_callback=self.elicit if self.event_caller else None,
+                ) as client:
+                    self.client = client
+                    self.instructions = client.instructions
+                    connected.set_result(None)
+                    await asyncio.sleep(math.inf)
+        except Exception as e:
+            if connected.done():
+                log.exception("Lost connection to MCP server '%s'", self.server_name)
+            else:
+                connected.set_exception(e)
+        finally:
+            self.client = None
+            if not connected.done():
+                connected.set_exception(RuntimeError('MCP client failed to connect.'))
 
-    async def list_tool_specs(self) -> Optional[dict]:
+    async def list_tool_specs(self) -> list[dict]:
         if not self.client:
             raise RuntimeError('MCP client is not connected.')
 
@@ -143,7 +170,12 @@ class MCPClient:
                 break
 
         tool_specs = []
+        self.tool_definitions = {
+            tool.name: tool.model_dump(mode='json', by_alias=True, exclude_none=True) for tool in tools
+        }
         for tool in tools:
+            if not tool_visible_to(self.tool_definitions[tool.name], 'model'):
+                continue
             name = tool.name
             description = tool.description
 
@@ -155,7 +187,7 @@ class MCPClient:
 
         return tool_specs
 
-    async def call_tool(self, function_name: str, function_args: dict) -> list[dict]:
+    async def call_tool_raw(self, function_name: str, function_args: dict) -> dict:
         if not self.client:
             raise RuntimeError('MCP client is not connected.')
 
@@ -168,11 +200,33 @@ class MCPClient:
         if not result:
             raise Exception('No result returned from MCP tool call.')
 
-        result_dict = result.model_dump(mode='json', by_alias=True)
-        result_content = result_dict['content']
+        return result.model_dump(mode='json', by_alias=True, exclude_none=True)
+
+    async def call_tool(self, function_name: str, function_args: dict) -> list[dict] | MCPAppResult:
+        raw = await self.call_tool_raw(function_name, function_args)
+        context = self.normalize_tool_result(raw)
+        tool = self.tool_definitions.get(function_name, {})
+        if not ui_resource_uri(tool):
+            return context
+        return MCPAppResult(
+            embed={
+                'type': 'mcp_app',
+                'server_id': self.server_name,
+                'tool_name': function_name,
+                'binding': app_binding(self.server_name, function_name),
+                'arguments': function_args,
+                'result': raw,
+            },
+            context=context,
+        )
+
+    @staticmethod
+    def normalize_tool_result(result_dict: dict) -> list[dict]:
+        # Keep the raw result intact for the app, including widget-only metadata.
+        result_content = list(result_dict['content'])
         texts = [item['text'] for item in result_content if item['type'] == 'text']
 
-        if result.is_error:
+        if result_dict.get('isError'):
             raise Exception('\n'.join(texts) or 'MCP tool call returned an error.')
 
         structured_content = result_dict.get('structuredContent')
@@ -212,6 +266,37 @@ class MCPClient:
         result_content.append({'type': 'text', 'text': structured_json})
         return result_content
 
+    async def read_ui_resource(self, uri: str) -> tuple[str, dict]:
+        result = await self.read_resource(uri)
+        content = next((item for item in result.get('contents', []) if item.get('uri') == uri), None)
+        if not content or content.get('mimeType') != APP_MIME_TYPE:
+            raise ValueError('Unsupported app resource')
+        document = content.get('text')
+        if document is None and isinstance(content.get('blob'), str):
+            document = base64.b64decode(content['blob'], validate=True).decode('utf-8')
+        if not isinstance(document, str) or not document or len(document.encode('utf-8')) > MAX_APP_BYTES:
+            raise ValueError('Invalid app HTML')
+
+        ui = ui_metadata(content)
+        if not ui:
+            # Some servers put CSP on resources/list rather than resources/read.
+            cursor = None
+            while True:
+                try:
+                    listing = await self.client.list_resources(cursor=cursor)
+                except Exception:
+                    # Listing is optional; missing policy still gets the restrictive default.
+                    break
+                listed = listing.model_dump(mode='json', by_alias=True, exclude_none=True)
+                entry = next((item for item in listed.get('resources', []) if item.get('uri') == uri), None)
+                if entry:
+                    ui = ui_metadata(entry)
+                    break
+                cursor = listed.get('nextCursor')
+                if not cursor:
+                    break
+        return document, ui
+
     async def list_resources(self, cursor: Optional[str] = None) -> Optional[dict]:
         if not self.client:
             raise RuntimeError('MCP client is not connected.')
@@ -220,7 +305,7 @@ class MCPClient:
         if not result:
             raise Exception('No result returned from MCP list_resources call.')
 
-        result_dict = result.model_dump(by_alias=True)
+        result_dict = result.model_dump(mode='json', by_alias=True, exclude_none=True)
         resources = result_dict.get('resources', [])
 
         return resources
@@ -232,7 +317,7 @@ class MCPClient:
         result = await self.client.read_resource(uri)
         if not result:
             raise Exception('No result returned from MCP read_resource call.')
-        result_dict = result.model_dump(by_alias=True)
+        result_dict = result.model_dump(mode='json', by_alias=True, exclude_none=True)
 
         return result_dict
 
@@ -242,38 +327,33 @@ class MCPClient:
         This method is idempotent — calling it multiple times or on a
         client that was never connected is safe.
         """
-        exit_stack = self.exit_stack
-        if exit_stack is None:
+        session_task = self.session_task
+        if session_task is None:
             return
 
         # Prevent double-close from concurrent callers
-        self.exit_stack = None
+        self.session_task = None
         self.client = None
+        session_task.cancel()
 
         try:
-            # IMPORTANT: Do NOT use asyncio.shield() or asyncio.wait_for()
-            # because they create a new asyncio task, which violates the MCP SDK's
-            # requirement that its TaskGroup be exited in the exact same task.
-            # ALSO do NOT use anyio.CancelScope(shield=True) or anyio.fail_after(),
-            # because they push a new cancel scope onto the task, violating LIFO
-            # order when aclose() attempts to exit the inner TaskGroup.
-            # We simply call aclose() directly. If the task is cancelled, the
-            # sockets will eventually be cleaned up by garbage collection.
-            await exit_stack.aclose()
-        except asyncio.CancelledError as exc:
+            await session_task
+        except asyncio.CancelledError:
             task = asyncio.current_task()
             if task is not None and task.cancelling():
                 raise
-            log.debug('MCPClient.disconnect() suppressed internal cancellation: %s', exc)
-        except RuntimeError as exc:
-            log.debug('MCPClient.disconnect() suppressed RuntimeError: %s', exc)
         except Exception as exc:
             log.debug('MCPClient.disconnect() error: %s', exc)
 
     async def __aenter__(self):
-        await self.exit_stack.__aenter__()
         return self
 
     async def __aexit__(self, exc_type, exc_value, traceback):
-        await self.exit_stack.__aexit__(exc_type, exc_value, traceback)
         await self.disconnect()
+
+
+def tool_visible_to(tool: dict, visibility: str) -> bool:
+    meta = tool.get('_meta') or {}
+    ui = (meta.get('ui') or {}) if isinstance(meta, dict) else {}
+    allowed = ui.get('visibility', ['model', 'app']) if isinstance(ui, dict) else []
+    return isinstance(allowed, list) and visibility in allowed

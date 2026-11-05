@@ -50,10 +50,7 @@
 	function portal(node: HTMLElement) {
 		document.body.appendChild(node);
 
-		// Content can grow after the dropdown is positioned - a submenu is opened, or an
-		// async list finishes loading - which would otherwise leave it overflowing the
-		// viewport. Compare scrollHeight (the natural content height) so that clamping
-		// max-height here cannot feed back into another reposition.
+		// Track scrollHeight as content grows; max-height clamping must not trigger a reposition loop.
 		const resizeObserver = new ResizeObserver(() => {
 			if (node.scrollHeight === lastContentHeight) return;
 			lastContentHeight = node.scrollHeight;
@@ -61,9 +58,14 @@
 		});
 		resizeObserver.observe(node);
 
+		// Items can render after the menu opens, e.g. an async list.
+		const mutationObserver = new MutationObserver(markMenuItems);
+		mutationObserver.observe(node, { childList: true, subtree: true });
+
 		return {
 			destroy() {
 				resizeObserver.disconnect();
+				mutationObserver.disconnect();
 				lastContentHeight = 0;
 				if (node.parentNode) {
 					node.parentNode.removeChild(node);
@@ -245,8 +247,15 @@
 		}
 	}
 
+	function markMenuItems() {
+		contentEl
+			?.querySelectorAll('button:not([role]), a[href]:not([role])')
+			.forEach((item) => item.setAttribute('role', 'menuitem'));
+	}
+
 	async function afterOpen() {
 		await tick();
+		markMenuItems();
 		positionContent();
 
 		// Re-check after transition renders real dimensions

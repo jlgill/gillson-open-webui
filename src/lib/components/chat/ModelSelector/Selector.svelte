@@ -1,4 +1,7 @@
 <script lang="ts">
+	import Comments from '$lib/components/comments/Comments.svelte';
+	import type { CommentsRequest } from '$lib/components/comments/CommentsPanel.svelte';
+	let comments: CommentsRequest | null = null;
 	import { marked } from 'marked';
 	import Fuse from 'fuse.js';
 	import { autoUpdate, computePosition, flip, offset, shift, size } from '@floating-ui/dom';
@@ -11,7 +14,7 @@
 	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import { flyAndScale } from '$lib/utils/transitions';
 
-	import { createEventDispatcher, onMount, getContext, tick } from 'svelte';
+	import { onMount, getContext, tick } from 'svelte';
 
 	import { deleteModel, getOllamaVersion, pullModel } from '$lib/apis/ollama';
 	import { deleteModelById } from '$lib/apis/models';
@@ -55,11 +58,11 @@
 	import ModelItem from './ModelItem.svelte';
 
 	const i18n: any = getContext('i18n');
-	const dispatch = createEventDispatcher();
 
 	export let id = '';
 	export let value: string | null = '';
 	export let values: string[] | null = null;
+	export let onModelSelect: (models: string[]) => void = () => {};
 	export let compareEnabled = false;
 	export let multipleEnabled = false;
 	export let disabled = false;
@@ -417,6 +420,7 @@
 		if (!enabled && values) {
 			values = [primaryValue || selectedValues[0] || ''];
 			value = values[0];
+			onModelSelect(values);
 		}
 	};
 
@@ -433,11 +437,13 @@
 
 				values = nextValues.length ? nextValues : [item.value];
 				value = values[0];
+				onModelSelect(values);
 				return;
 			}
 
 			values = [item.value];
 			value = item.value;
+			onModelSelect(values);
 			show = false;
 			window.setTimeout(focusChatInput, 0);
 			return;
@@ -960,7 +966,9 @@
 								aria-autocomplete="list"
 								aria-expanded={filteredItems.length + downloadTargets.length > 0}
 								aria-controls="model-selector-list"
-								aria-activedescendant={filteredItems.length + downloadTargets.length > 0
+								aria-activedescendant={filteredItems.length + downloadTargets.length > 0 &&
+								(selectedModelIdx >= filteredItems.length ||
+									(selectedModelIdx >= visibleStart && selectedModelIdx < visibleEnd))
 									? `model-option-${selectedModelIdx}`
 									: undefined}
 								on:keydown={(e) => {
@@ -986,6 +994,18 @@
 									} else {
 										// if the user types something, reset to the top selection.
 										selectedModelIdx = 0;
+									}
+
+									if (
+										listContainer &&
+										selectedModelIdx < filteredItems.length &&
+										(selectedModelIdx < visibleStart || selectedModelIdx >= visibleEnd)
+									) {
+										listScrollTop = Math.max(
+											0,
+											selectedModelIdx * ITEM_HEIGHT - 128 + ITEM_HEIGHT / 2
+										);
+										listContainer.scrollTop = listScrollTop;
 									}
 
 									const item = document.querySelector(`[data-arrow-selected="true"]`);
@@ -1106,7 +1126,8 @@
 								{#each filteredItems.slice(visibleStart, visibleEnd) as item, i (item.value)}
 									{@const index = visibleStart + i}
 									<ModelItem
-										{selectedModelIdx}
+										onComment={(request) => (comments = request)}
+										bind:selectedModelIdx
 										{item}
 										{index}
 										value={primaryValue}
@@ -1309,3 +1330,5 @@
 		</div>
 	{/if}
 </div>
+
+<Comments modal bind:view={comments} />
