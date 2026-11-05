@@ -78,7 +78,9 @@ Each chat-turn trace holds the filter's `respond-to-chat` root with one
 `run-agent-step` span per model call; this callback adds the `generate-response`
 generation (per-call input/output, tool calls, reasoning, TTFT, model params,
 accurate cost + token counts) inside the matching step, and task generations
-under the root. The filter (v2.2.0+) also records a `record-conversation` event
+under the root. Model parameters come from LiteLLM's
+`standard_logging_object.model_parameters` and follow the content-capture policy.
+The filter (v2.2.0+) also records a `record-conversation` event
 under the root that replays the turn in OWUI display order; it carries no usage,
 so cost and tokens stay solely on these generations.
 """
@@ -314,9 +316,9 @@ def _extract_reasoning(response_obj: Any) -> Optional[str]:
 
 
 def _extract_model_parameters(kwargs: dict) -> Optional[dict]:
-    """Model parameters from the standard logging payload (modelParameters)."""
+    """Model parameters from LiteLLM's standard logging payload."""
     slo = kwargs.get("standard_logging_object") or {}
-    params = slo.get("modelParameters") if isinstance(slo, dict) else None
+    params = slo.get("model_parameters") if isinstance(slo, dict) else None
     if isinstance(params, dict) and params:
         return {str(k): v for k, v in params.items() if v is not None}
     return None
