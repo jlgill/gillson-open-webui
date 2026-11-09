@@ -325,3 +325,7 @@ terminal_spec.json
 
 # Codepointer artifacts
 .cptr
+/evals/
+
+# Local temporary fixtures and screenshots
+/tmp/
