@@ -456,7 +456,7 @@ services:
       - owui-network
 
   open-webui:
-    image: ghcr.io/jlgill/gillson-open-webui@sha256:42b1e2b6d54c42517a15a1565465186975919c858b49846b3cd13da897626d4a
+    image: ghcr.io/jlgill/gillson-open-webui:v0.13.3
     container_name: owui-app
     entrypoint: ["/bin/sh", "/app/owui-oauth-entrypoint.sh"]
     command: ["bash", "start.sh"]
