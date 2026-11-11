@@ -566,7 +566,7 @@ services:
       - outline-net
 
   open-terminal:
-    image: ghcr.io/open-webui/open-terminal:0.16.2
+    image: ghcr.io/open-webui/open-terminal:0.17.7
     container_name: owui-terminal
     restart: unless-stopped
     environment:
